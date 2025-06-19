@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - feat/ci-cd
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        id: docker_build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/leadme5-ai:latest
+
+      - name: Get image digest
+        id: get_digest
+        run: echo "IMAGE_DIGEST=${{ steps.docker_build.outputs.digest }}" >> $GITHUB_ENV
+
+      - name: Checkout infra-k8s repository
+        uses: actions/checkout@v4
+        with:
+          repository: LEADME-skala5/infra-k8s
+          path: infra-k8s
+          token: ${{ secrets.GIT_PAT }}
+
+      - name: Update infra-k8s deployment.yaml with new image digest
+        run: |
+          echo "Updating deployment.yaml with new image digest: ${{ env.IMAGE_DIGEST }}"
+          sed -i 's|image: .*/leadme5-ai.*|image: ${{ secrets.DOCKERHUB_USERNAME }}/leadme5-ai@${{ env.IMAGE_DIGEST }}|g' infra-k8s/ai/deployment.yaml
+
+      - name: Commit and push updated deployment.yaml
+        run: |
+          cd infra-k8s
+          git config user.name "SanghyunLee"
+          git config user.email "lgw9736@naver.com"
+          git add ai/deployment.yaml
+          git commit -m "Update deployment image to ${{ env.IMAGE_DIGEST }}"
+          git push origin main
