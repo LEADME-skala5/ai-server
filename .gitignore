@@ -1,0 +1,55 @@
+venv
+myvenv
+.myvenv
+.idea
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+pip-wheel-metadata/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 환경 변수 및 민감 정보
+.env
+*.env
+
+# 로그, 임시 파일, 모델 체크포인트, 대용량 파일
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Model weights, output
+*.pth
+*.ckpt
+*.h5
+
+# 기타
+.idea/
+__pypackages__/
