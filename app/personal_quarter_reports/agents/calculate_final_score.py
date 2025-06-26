@@ -37,7 +37,7 @@ class MongoDBManager:
     def __init__(self):
         self.mongodb_uri = f"mongodb://{MONGO_CONFIG['username']}:{MONGO_CONFIG['password']}@{MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/"
         self.database_name = MONGO_CONFIG["db_name"]
-        self.collection_name = "personal_quarter_reports"
+        self.collection_name = "final_score_results"  # ✅ 변경: personal_quarter_reports → final_score_results
         self.client = None
     
     def connect(self):
@@ -61,18 +61,32 @@ class MongoDBManager:
             db = self.client[self.database_name]
             collection = db[self.collection_name]
             
-            # final_score 구조로 감싸기
+            # 평가 기간에서 연도와 분기 추출
+            evaluation_period = quarter_data.get("meta", {}).get("evaluation_period", "")
+            if evaluation_period:
+                # "2024Q1" 형식에서 연도와 분기 추출
+                year = int(evaluation_period[:4])
+                quarter = int(evaluation_period[5:])
+            else:
+                year = 2024
+                quarter = 1
+            
+            # ✅ 새로운 구조: final_score로 감싸지 않고 직접 저장
             final_score_document = {
-                "final_score": quarter_data,
+                "type": "final-score-quarter",           # 타입 구분
+                "evaluated_year": year,                  # 평가 연도
+                "evaluated_quarter": quarter,            # 평가 분기
+                "meta": quarter_data.get("meta", {}),    # 메타 정보
+                "statistics": quarter_data.get("statistics", {}),  # 통계 정보
+                "evaluations": quarter_data.get("evaluations", []), # 평가 결과 배열
                 "created_at": datetime.now(),
-                "updated_at": datetime.now(),
-                "data_type": "final_score_results",
-                "quarter": quarter_data.get("meta", {}).get("evaluation_period", "unknown")
+                "updated_at": datetime.now()
             }
             
             result = collection.insert_one(final_score_document)
             print(f"✅ MongoDB 저장 완료 - Document ID: {result.inserted_id}")
-            print(f"   분기: {final_score_document['quarter']}")
+            print(f"   타입: final-score-quarter")
+            print(f"   연도/분기: {year}년 {quarter}분기")
             print(f"   컬렉션: {self.database_name}.{self.collection_name}")
             
             return True
@@ -415,14 +429,17 @@ def main():
         if f"Q{quarter}" in all_quarters_results:
             quarter_data = all_quarters_results[f"Q{quarter}"]
             successful = quarter_data["meta"]["successful_evaluations"]
-            print(f"Q{quarter}: 성공 {successful}명 → MongoDB 저장 완료")
+            print(f"Q{quarter}: 성공 {successful}명 → type: 'final-score-quarter', evaluated_year: {EVAL_YEAR}, evaluated_quarter: {quarter}")
         else:
             print(f"Q{quarter}: 데이터 없음")
     
     print(f"\n🎉 처리 완료 요약:")
+    print(f"  - 저장 방식: final_score_results 컬렉션에 type별로 구분")
     print(f"  - 데이터베이스: {MONGO_CONFIG['db_name']}")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 구조: final_score > 실제데이터")
+    print(f"  - 컬렉션: final_score_results")
+    print(f"  - 문서 개수: {len(all_quarters_results)}개 (각 분기별)")
+    print(f"  - 문서 구조: type/evaluated_year/evaluated_quarter/meta/statistics/evaluations[]")
+    print(f"  - 계산 방식: 가중 평균 (정량 40% + 정성 30% + 동료평가 30%)")
     
     # MongoDB 연결 종료
     mongodb_manager.close()

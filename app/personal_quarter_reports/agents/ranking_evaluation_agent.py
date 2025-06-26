@@ -38,7 +38,7 @@ class MongoDBManager:
     def __init__(self):
         self.mongodb_uri = f"mongodb://{MONGO_CONFIG['username']}:{MONGO_CONFIG['password']}@{MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/"
         self.database_name = MONGO_CONFIG["db_name"]
-        self.collection_name = "personal_quarter_reports"
+        self.collection_name = "ranking_results"  # 변경된 컬렉션명
         self.client = None
         
         print(f"📋 MongoDB 설정 로드 완료: {MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/{self.database_name}")
@@ -55,7 +55,7 @@ class MongoDBManager:
             return False
     
     def add_user_to_quarter_document(self, user_data: Dict) -> bool:
-        """분기별 문서에 사용자 데이터 추가"""
+        """분기별 문서에 사용자 데이터 추가 - 새로운 형식"""
         try:
             if not self.client:
                 if not self.connect():
@@ -64,18 +64,21 @@ class MongoDBManager:
             db = self.client[self.database_name]
             collection = db[self.collection_name]
             
-            quarter_key = f"{user_data['year']}Q{user_data['quarter']}"
-            
             # 해당 분기 문서가 존재하는지 확인
             existing_doc = collection.find_one({
-                "quarter": quarter_key,
-                "data_type": "ranking_results"
+                "type": "personal-quarter",
+                "evaluated_year": user_data['year'],
+                "evaluated_quarter": user_data['quarter']
             })
             
             if existing_doc:
                 # 기존 문서에 사용자 데이터 추가
                 collection.update_one(
-                    {"quarter": quarter_key, "data_type": "ranking_results"},
+                    {
+                        "type": "personal-quarter",
+                        "evaluated_year": user_data['year'],
+                        "evaluated_quarter": user_data['quarter']
+                    },
                     {
                         "$push": {"users": user_data},
                         "$set": {"updated_at": datetime.now()},
@@ -86,10 +89,9 @@ class MongoDBManager:
             else:
                 # 새로운 분기 문서 생성
                 quarter_document = {
-                    "quarter": quarter_key,
-                    "year": user_data['year'],
-                    "quarter_num": user_data['quarter'],
-                    "data_type": "ranking_results",
+                    "type": "personal-quarter",
+                    "evaluated_year": user_data['year'],
+                    "evaluated_quarter": user_data['quarter'],
                     "user_count": 1,
                     "users": [user_data],
                     "created_at": datetime.now(),
@@ -269,10 +271,10 @@ class RankingEvaluationSystem:
             "ranking_info": {
                 "job_name": ranking_data['job_name'],
                 "job_years": ranking_data['job_years'],
-                "rank": ranking_data['user_rank'],
-                "total_in_group": ranking_data['total_in_group'],
-                "team_rank": ranking_data['team_rank'],
-                "total_in_team": ranking_data['total_in_team'],
+                "same_job_rank": ranking_data['user_rank'],
+                "same_job_user_count": ranking_data['total_in_group'],
+                "organization_rank": ranking_data['team_rank'],
+                "organization_user_count": ranking_data['total_in_team'],
                 "organization_id": ranking_data['organization_id']
             },
             "scores": {
@@ -290,7 +292,7 @@ class RankingEvaluationSystem:
             mongodb_save_success = self.mongodb_manager.add_user_to_quarter_document(result_data)
             
             if mongodb_save_success:
-                print(f"✅ 사용자 ID {user_id} 랭킹 평가 분기별 문서에 추가 완료")
+                print(f"✅ 사용자 ID {user_id} 랭킹 평가 ranking_results 컬렉션에 추가 완료")
             else:
                 print(f"❌ 사용자 ID {user_id} 랭킹 평가 MongoDB 저장 실패")
         
@@ -302,7 +304,7 @@ class RankingEvaluationSystem:
         return result
     
     def process_batch_ranking_evaluation(self, user_ids: List[int], evaluation_year: int, evaluation_quarter: int) -> List[Dict]:
-        """배치 랭킹 평가 처리 - 분기별 문서에 사용자 데이터 추가"""
+        """배치 랭킹 평가 처리 - ranking_results 컬렉션에 저장"""
         results = []
         total_users = len(user_ids)
         
@@ -316,7 +318,7 @@ class RankingEvaluationSystem:
             # 성공/실패 여부 출력
             if result["success"]:
                 rank_info = result["data"]["ranking_info"]
-                print(f"✓ User {user_id}: {rank_info['job_name']} {rank_info['job_years']}년차 {rank_info['rank']}/{rank_info['total_in_group']}등, 팀내 {rank_info['team_rank']}/{rank_info['total_in_team']}등 → 분기별 문서에 추가 완료")
+                print(f"✓ User {user_id}: {rank_info['job_name']} {rank_info['job_years']}년차 {rank_info['same_job_rank']}/{rank_info['same_job_user_count']}등, 팀내 {rank_info['organization_rank']}/{rank_info['organization_user_count']}등 → ranking_results 컬렉션에 저장 완료")
             else:
                 print(f"✗ User {user_id}: 랭킹 데이터 없음")
         
@@ -440,10 +442,10 @@ class RankingEvaluationSystem:
             conn.close()
 
 def process_single_quarter_ranking(system: RankingEvaluationSystem, user_ids: List[int], year: int, quarter: int):
-    """단일 분기 랭킹 평가 처리 - 분기별 문서에 사용자 데이터 추가"""
+    """단일 분기 랭킹 평가 처리 - ranking_results 컬렉션에 저장"""
     print(f"\n=== {year}년 {quarter}분기 랭킹 평가 처리 시작 ===")
     print(f"처리할 사용자 수: {len(user_ids)}명")
-    print(f"MongoDB 저장 방식: {year}Q{quarter} 문서에 사용자 데이터 추가")
+    print(f"MongoDB 저장 방식: ranking_results 컬렉션에 type: 'personal-quarter'로 구분")
     print("=" * 50)
     
     # 배치 처리 실행
@@ -454,7 +456,7 @@ def process_single_quarter_ranking(system: RankingEvaluationSystem, user_ids: Li
     failed_count = len(results) - successful_count
     
     print(f"\n=== {quarter}분기 랭킹 평가 처리 완료 ===")
-    print(f"성공: {successful_count}명 → {year}Q{quarter} 문서에 추가 완료")
+    print(f"성공: {successful_count}명 → ranking_results 컬렉션에 저장 완료")
     print(f"실패: {failed_count}명")
     
     # 점수 분포 통계
@@ -496,14 +498,14 @@ def main():
     # 평가 년도 설정
     evaluation_year = 2024
     
-    print(f"\n🚀 {evaluation_year}년 전체 분기 랭킹 평가 처리 시작 (분기별 문서 저장)")
-    print(f"저장 방식: 분기별 문서에 사용자 데이터 누적 추가")
-    print(f"저장 위치: MongoDB - {MONGO_CONFIG['db_name']}.personal_quarter_reports")
+    print(f"\n🚀 {evaluation_year}년 전체 분기 랭킹 평가 처리 시작")
+    print(f"저장 방식: ranking_results 컬렉션에 type: 'personal-quarter'로 구분")
+    print(f"저장 위치: MongoDB - {MONGO_CONFIG['db_name']}.ranking_results")
     print(f"문서 구조:")
-    print(f"  - {evaluation_year}Q1 문서: Q1 모든 사용자 랭킹 데이터")
-    print(f"  - {evaluation_year}Q2 문서: Q2 모든 사용자 랭킹 데이터")
-    print(f"  - {evaluation_year}Q3 문서: Q3 모든 사용자 랭킹 데이터")
-    print(f"  - {evaluation_year}Q4 문서: Q4 모든 사용자 랭킹 데이터")
+    print(f"  - type: 'personal-quarter'")
+    print(f"  - evaluated_year: {evaluation_year}")
+    print(f"  - evaluated_quarter: 1, 2, 3, 4")
+    print(f"  - users: [사용자별 랭킹 데이터 배열]")
     print("=" * 60)
     
     # 전체 결과 저장용
@@ -555,17 +557,17 @@ def main():
             quarter_data = all_quarters_results[f"Q{quarter}"]
             successful = quarter_data["successful_count"]
             total_processed += successful
-            print(f"Q{quarter}: 성공 {successful}명 → {evaluation_year}Q{quarter} 문서에 저장 완료")
+            print(f"Q{quarter}: 성공 {successful}명 → type: 'personal-quarter', evaluated_year: {evaluation_year}, evaluated_quarter: {quarter}")
         else:
             print(f"Q{quarter}: 데이터 없음 또는 처리 실패")
     
     print(f"\n🎉 처리 완료 요약:")
     print(f"  - 총 처리된 사용자: {total_processed}명")
-    print(f"  - 저장 방식: 분기별 하나의 문서에 모든 사용자 데이터 저장")
+    print(f"  - 저장 방식: ranking_results 컬렉션에 type별로 구분")
     print(f"  - 데이터베이스: {MONGO_CONFIG['db_name']}")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 총 문서 수: 4개 ({evaluation_year}Q1, {evaluation_year}Q2, {evaluation_year}Q3, {evaluation_year}Q4)")
-    print(f"  - 문서 구조: quarter/year/quarter_num/data_type/user_count/users[]")
+    print(f"  - 컬렉션: ranking_results")
+    print(f"  - 문서 개수: {len(all_quarters_results)}개 (각 분기별)")
+    print(f"  - 문서 구조: type/evaluated_year/evaluated_quarter/user_count/users[]")
     print(f"  - MariaDB user_quarter_scores.user_rank, team_rank 업데이트 완료")
     
     # MongoDB 연결 종료

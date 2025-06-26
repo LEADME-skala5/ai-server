@@ -39,7 +39,7 @@ class MongoDBManager:
         self.database_name = os.getenv("MONGO_DB_NAME")
         
         self.mongodb_uri = f"mongodb://{self.username}:{self.password}@{self.host}:{self.port}/"
-        self.collection_name = "personal_quarter_reports"
+        self.collection_name = "peer_evaluation_results"  # 변경된 컬렉션명
         self.client = None
         
         print(f"📋 MongoDB 설정 로드 완료: {self.host}:{self.port}/{self.database_name}")
@@ -57,7 +57,7 @@ class MongoDBManager:
             return False
     
     def add_user_to_quarter_document(self, user_data: Dict) -> bool:
-        """분기별 문서에 사용자 데이터 추가"""
+        """분기별 문서에 사용자 데이터 추가 - 새로운 형식"""
         try:
             if not self.client:
                 if not self.connect():
@@ -66,18 +66,21 @@ class MongoDBManager:
             db = self.client[self.database_name]
             collection = db[self.collection_name]
             
-            quarter_key = f"{user_data['year']}Q{user_data['quarter']}"
-            
             # 해당 분기 문서가 존재하는지 확인
             existing_doc = collection.find_one({
-                "quarter": quarter_key,
-                "data_type": "peer_evaluation_results"
+                "type": "personal-quarter",
+                "evaluated_year": user_data['year'],
+                "evaluated_quarter": user_data['quarter']
             })
             
             if existing_doc:
                 # 기존 문서에 사용자 데이터 추가
                 collection.update_one(
-                    {"quarter": quarter_key, "data_type": "peer_evaluation_results"},
+                    {
+                        "type": "personal-quarter",
+                        "evaluated_year": user_data['year'],
+                        "evaluated_quarter": user_data['quarter']
+                    },
                     {
                         "$push": {"users": user_data},
                         "$set": {"updated_at": datetime.now()},
@@ -88,10 +91,9 @@ class MongoDBManager:
             else:
                 # 새로운 분기 문서 생성
                 quarter_document = {
-                    "quarter": quarter_key,
-                    "year": user_data['year'],
-                    "quarter_num": user_data['quarter'],
-                    "data_type": "peer_evaluation_results",
+                    "type": "personal-quarter",
+                    "evaluated_year": user_data['year'],
+                    "evaluated_quarter": user_data['quarter'],
                     "user_count": 1,
                     "users": [user_data],
                     "created_at": datetime.now(),
@@ -365,7 +367,7 @@ class PeerEvaluationOrchestrator:
         self.mongodb_manager = MongoDBManager()
     
     def process_peer_evaluation(self, user_id: int, year: int, quarter: int, save_to_mongodb: bool = True) -> Dict:
-        """전체 동료평가 프로세스 실행 - 분기별 MongoDB 저장"""
+        """전체 동료평가 프로세스 실행 - peer_evaluation_results 컬렉션에 저장"""
         try:
             # 1. 데이터 조회
             keyword_data = self.db_system.fetch_peer_evaluation_data(user_id, year, quarter)
@@ -402,12 +404,12 @@ class PeerEvaluationOrchestrator:
                 "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            # 6. 분기별 문서에 사용자 데이터 추가
+            # 6. MongoDB에 사용자 데이터 추가 (새로운 형식)
             if save_to_mongodb:
                 mongodb_save_success = self.mongodb_manager.add_user_to_quarter_document(result_data)
                 
                 if mongodb_save_success:
-                    print(f"✅ 사용자 ID {user_id} 동료평가 분기별 문서에 추가 완료")
+                    print(f"✅ 사용자 ID {user_id} 동료평가 peer_evaluation_results 컬렉션에 추가 완료")
                 else:
                     print(f"❌ 사용자 ID {user_id} 동료평가 MongoDB 저장 실패")
             
@@ -427,7 +429,7 @@ class PeerEvaluationOrchestrator:
             }
     
     def process_batch_peer_evaluation(self, user_ids: List[int], year: int, quarter: int) -> List[Dict]:
-        """여러 사용자의 동료평가를 배치 처리 - 분기별 문서에 추가"""
+        """여러 사용자의 동료평가를 배치 처리 - peer_evaluation_results 컬렉션에 저장"""
         results = []
         total_users = len(user_ids)
         successful_count = 0
@@ -439,7 +441,7 @@ class PeerEvaluationOrchestrator:
             if i % 10 == 0 or i == total_users:
                 print(f"처리 진행률: {i}/{total_users} ({i/total_users*100:.1f}%)")
             
-            # 개별 사용자 처리 (분기별 문서에 추가)
+            # 개별 사용자 처리 (qualitative_evaluation_results 컬렉션에 저장)
             result = self.process_peer_evaluation(user_id, year, quarter, save_to_mongodb=True)
             results.append(result)
             
@@ -448,7 +450,7 @@ class PeerEvaluationOrchestrator:
                 successful_count += 1
                 score = result["data"]["peer_evaluation_score"]
                 scores.append(score)
-                print(f"✓ User {user_id}: {score:.2f}/5.0 → 분기별 문서에 추가 완료")
+                print(f"✓ User {user_id}: {score:.2f}/5.0 → peer_evaluation_results 컬렉션에 저장 완료")
             else:
                 failed_count += 1
                 print(f"✗ User {user_id}: 데이터 없음")
@@ -473,13 +475,13 @@ class PeerEvaluationOrchestrator:
         return [row[0] for row in results]
 
 def process_single_quarter(orchestrator, user_ids, year, quarter):
-    """단일 분기 처리 함수 - 분기별 문서에 사용자 데이터 추가"""
+    """단일 분기 처리 함수 - peer_evaluation_results 컬렉션에 저장"""
     print(f"\n=== {year}년 {quarter}분기 동료평가 처리 시작 ===")
     print(f"처리할 사용자 수: {len(user_ids)}명")
-    print(f"MongoDB 저장 방식: {year}Q{quarter} 문서에 사용자 데이터 추가")
+    print(f"MongoDB 저장 방식: peer_evaluation_results 컬렉션에 type: 'personal-quarter'로 구분")
     print("=" * 50)
     
-    # 배치 처리 실행 (각 사용자를 분기별 문서에 추가)
+    # 배치 처리 실행
     results = orchestrator.process_batch_peer_evaluation(
         user_ids=user_ids,
         year=year,
@@ -491,7 +493,7 @@ def process_single_quarter(orchestrator, user_ids, year, quarter):
     failed_count = len(results) - successful_count
     
     print(f"\n=== {quarter}분기 동료평가 처리 완료 ===")
-    print(f"성공: {successful_count}명 → {year}Q{quarter} 문서에 추가 완료")
+    print(f"성공: {successful_count}명 → peer_evaluation_results 컬렉션에 저장 완료")
     print(f"실패: {failed_count}명")
     
     avg_score = None
@@ -539,16 +541,16 @@ def main():
     # 1~100 사용자 ID 리스트 생성
     user_ids = list(range(1, 101))
     
-    print(f"\n=== 2024년 전체 분기 동료평가 배치 처리 시작 (분기별 문서 저장) ===")
+    print(f"\n=== 2024년 전체 분기 동료평가 배치 처리 시작 ===")
     print(f"처리할 사용자 수: {len(user_ids)}명")
     print(f"처리할 분기: Q1, Q2, Q3, Q4")
-    print(f"저장 방식: 분기별 문서에 사용자 데이터 누적 추가")
-    print(f"저장 위치: MongoDB - {os.getenv('MONGO_DB_NAME')}.personal_quarter_reports")
+    print(f"저장 방식: peer_evaluation_results 컬렉션에 type: 'personal-quarter'로 구분")
+    print(f"저장 위치: MongoDB - {os.getenv('MONGO_DB_NAME')}.peer_evaluation_results")
     print(f"문서 구조:")
-    print(f"  - 2024Q1 문서: Q1 모든 사용자 데이터")
-    print(f"  - 2024Q2 문서: Q2 모든 사용자 데이터")
-    print(f"  - 2024Q3 문서: Q3 모든 사용자 데이터")
-    print(f"  - 2024Q4 문서: Q4 모든 사용자 데이터")
+    print(f"  - type: 'personal-quarter'")
+    print(f"  - evaluated_year: 2024")
+    print(f"  - evaluated_quarter: 1, 2, 3, 4")
+    print(f"  - users: [사용자별 평가 데이터 배열]")
     print("=" * 60)
     
     # 전체 결과 저장용
@@ -571,17 +573,17 @@ def main():
             quarter_data = all_quarters_results[f"Q{quarter}"]
             successful = quarter_data["successful_count"]
             total_processed += successful
-            print(f"Q{quarter}: 성공 {successful}명 → 2024Q{quarter} 문서에 저장 완료")
+            print(f"Q{quarter}: 성공 {successful}명 → type: 'personal-quarter', evaluated_year: 2024, evaluated_quarter: {quarter}")
         else:
             print(f"Q{quarter}: 데이터 없음")
     
     print(f"\n🎉 처리 완료 요약:")
     print(f"  - 총 처리된 사용자: {total_processed}명")
-    print(f"  - 저장 방식: 분기별 하나의 문서에 모든 사용자 데이터 저장")
+    print(f"  - 저장 방식: peer_evaluation_results 컬렉션에 type별로 구분")
     print(f"  - 데이터베이스: {os.getenv('MONGO_DB_NAME')}")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 총 문서 수: 4개 (2024Q1, 2024Q2, 2024Q3, 2024Q4)")
-    print(f"  - 문서 구조: quarter/year/quarter_num/data_type/user_count/users[]")
+    print(f"  - 컬렉션: peer_evaluation_results")
+    print(f"  - 문서 개수: 4개 (각 분기별)")
+    print(f"  - 문서 구조: type/evaluated_year/evaluated_quarter/user_count/users[]")
     print(f"  - MariaDB user_quarter_scores.peer_score 업데이트 완료")
     
     # MongoDB 연결 종료

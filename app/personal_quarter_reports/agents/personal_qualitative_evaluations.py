@@ -48,7 +48,7 @@ class MongoDBManager:
     def __init__(self):
         self.mongodb_uri = f"mongodb://{MONGO_CONFIG['username']}:{MONGO_CONFIG['password']}@{MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/"
         self.database_name = MONGO_CONFIG["db_name"]
-        self.collection_name = "personal_quarter_reports"
+        self.collection_name = "qualitative_evaluation_results"  # 변경된 컬렉션명
         self.client = None
         
         print(f"📋 MongoDB 설정 로드 완료: {MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/{self.database_name}")
@@ -65,7 +65,7 @@ class MongoDBManager:
             return False
     
     def add_user_to_quarter_document(self, user_data: dict) -> bool:
-        """분기별 문서에 사용자 데이터 추가"""
+        """분기별 문서에 사용자 데이터 추가 - 새로운 형식"""
         try:
             if not self.client:
                 if not self.connect():
@@ -74,18 +74,21 @@ class MongoDBManager:
             db = self.client[self.database_name]
             collection = db[self.collection_name]
             
-            quarter_key = f"{user_data['year']}Q{user_data['quarter']}"
-            
             # 해당 분기 문서가 존재하는지 확인
             existing_doc = collection.find_one({
-                "quarter": quarter_key,
-                "data_type": "qualitative_evaluation_results"
+                "type": "personal-quarter",
+                "evaluated_year": user_data['year'],
+                "evaluated_quarter": user_data['quarter']
             })
             
             if existing_doc:
                 # 기존 문서에 사용자 데이터 추가
                 collection.update_one(
-                    {"quarter": quarter_key, "data_type": "qualitative_evaluation_results"},
+                    {
+                        "type": "personal-quarter",
+                        "evaluated_year": user_data['year'],
+                        "evaluated_quarter": user_data['quarter']
+                    },
                     {
                         "$push": {"users": user_data},
                         "$set": {"updated_at": datetime.now()},
@@ -96,10 +99,9 @@ class MongoDBManager:
             else:
                 # 새로운 분기 문서 생성
                 quarter_document = {
-                    "quarter": quarter_key,
-                    "year": user_data['year'],
-                    "quarter_num": user_data['quarter'],
-                    "data_type": "qualitative_evaluation_results",
+                    "type": "personal-quarter",
+                    "evaluated_year": user_data['year'],
+                    "evaluated_quarter": user_data['quarter'],
                     "user_count": 1,
                     "users": [user_data],
                     "created_at": datetime.now(),
@@ -195,9 +197,9 @@ def save_evaluation_as_json(user_id, eval_year, eval_quarter, qualitative_score,
     return filename
 
 def process_single_quarter_qualitative(mongodb_manager, eval_year, eval_quarter):
-    """단일 분기 정성 평가 처리 - 분기별 문서에 사용자 데이터 추가"""
+    """단일 분기 정성 평가 처리 - qualitative_evaluation_results 컬렉션에 저장"""
     print(f"\n=== {eval_year}년 {eval_quarter}분기 정성 평가 처리 시작 ===")
-    print(f"MongoDB 저장 방식: {eval_year}Q{eval_quarter} 문서에 사용자 데이터 추가")
+    print(f"MongoDB 저장 방식: qualitative_evaluation_results 컬렉션에 type: 'personal-quarter'로 구분")
     print("=" * 50)
     
     # 1) DB에서 해당 년도 및 분기의 평가 데이터 로드
@@ -330,7 +332,7 @@ def process_single_quarter_qualitative(mongodb_manager, eval_year, eval_quarter)
                     qualitative_score=row['total_score']
                 )
                 
-                # 7) 분기별 문서에 사용자 데이터 추가
+                # 7) MongoDB에 사용자 데이터 추가 (새로운 형식)
                 user_evaluation_data = {
                     "user_id": row['user_id'],
                     "year": eval_year,
@@ -344,13 +346,13 @@ def process_single_quarter_qualitative(mongodb_manager, eval_year, eval_quarter)
                 mongodb_save_success = mongodb_manager.add_user_to_quarter_document(user_evaluation_data)
                 
                 if mongodb_save_success:
-                    print(f"✅ 사용자 ID {row['user_id']} 분기별 문서에 추가 완료")
+                    print(f"✅ 사용자 ID {row['user_id']} qualitative_evaluation_results 컬렉션에 추가 완료")
                 else:
                     print(f"❌ 사용자 ID {row['user_id']} MongoDB 저장 실패 - JSON 백업만 유지")
                 
                 successful_count += 1
                 scores.append(row['total_score'])
-                print(f"✓ User {row['user_id']}: {row['total_score']:.2f}/5.0 → 분기별 문서에 추가 완료")
+                print(f"✓ User {row['user_id']}: {row['total_score']:.2f}/5.0 → MongoDB 저장 완료")
                 
             except Exception as e:
                 print(f"❌ 사용자 ID {row['user_id']} 처리 실패: {e}")
@@ -358,7 +360,7 @@ def process_single_quarter_qualitative(mongodb_manager, eval_year, eval_quarter)
 
         # 통계 계산 및 출력
         print(f"\n=== {eval_quarter}분기 정성 평가 처리 완료 ===")
-        print(f"성공: {successful_count}명 → {eval_year}Q{eval_quarter} 문서에 추가 완료")
+        print(f"성공: {successful_count}명 → qualitative_evaluation_results 컬렉션에 저장 완료")
         print(f"실패: {failed_count}명")
         
         avg_score = None
@@ -395,7 +397,7 @@ def process_single_quarter_qualitative(mongodb_manager, eval_year, eval_quarter)
         conn.close()
 
 def main():
-    print("🚀 정성 평가 처리 시작 (분기별 문서 저장 방식)")
+    print("🚀 정성 평가 처리 시작 (qualitative_evaluation_results 컬렉션 저장)")
     print("=" * 60)
     
     # MongoDB 매니저 초기화
@@ -406,14 +408,14 @@ def main():
     # 전체 결과 저장용
     all_quarters_results = {}
     
-    print(f"\n=== 2024년 전체 분기 정성 평가 배치 처리 시작 (분기별 문서 저장) ===")
-    print(f"저장 방식: 분기별 문서에 사용자 데이터 누적 추가")
-    print(f"저장 위치: MongoDB - {MONGO_CONFIG['db_name']}.personal_quarter_reports")
+    print(f"\n=== 2024년 전체 분기 정성 평가 배치 처리 시작 ===")
+    print(f"저장 방식: qualitative_evaluation_results 컬렉션에 type: 'personal-quarter'로 구분")
+    print(f"저장 위치: MongoDB - {MONGO_CONFIG['db_name']}.qualitative_evaluation_results")
     print(f"문서 구조:")
-    print(f"  - 2024Q1 문서: Q1 모든 사용자 데이터")
-    print(f"  - 2024Q2 문서: Q2 모든 사용자 데이터") 
-    print(f"  - 2024Q3 문서: Q3 모든 사용자 데이터")
-    print(f"  - 2024Q4 문서: Q4 모든 사용자 데이터")
+    print(f"  - type: 'personal-quarter'")
+    print(f"  - evaluated_year: 2024")
+    print(f"  - evaluated_quarter: 1, 2, 3, 4")
+    print(f"  - users: [사용자별 평가 데이터 배열]")
     print("=" * 60)
     
     # 4개 분기 모두 처리
@@ -433,17 +435,17 @@ def main():
             quarter_data = all_quarters_results[f"Q{quarter}"]
             successful = quarter_data["successful_count"]
             total_processed += successful
-            print(f"Q{quarter}: 성공 {successful}명 → 2024Q{quarter} 문서에 저장 완료")
+            print(f"Q{quarter}: 성공 {successful}명 → type: 'personal-quarter', evaluated_year: 2024, evaluated_quarter: {quarter}")
         else:
             print(f"Q{quarter}: 데이터 없음")
     
     print(f"\n🎉 처리 완료 요약:")
     print(f"  - 총 처리된 사용자: {total_processed}명")
-    print(f"  - 저장 방식: 분기별 하나의 문서에 모든 사용자 데이터 저장")
+    print(f"  - 저장 방식: qualitative_evaluation_results 컬렉션에 type별로 구분")
     print(f"  - 데이터베이스: {MONGO_CONFIG['db_name']}")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 총 문서 수: 4개 (2024Q1, 2024Q2, 2024Q3, 2024Q4)")
-    print(f"  - 문서 구조: quarter/year/quarter_num/data_type/user_count/users[]")
+    print(f"  - 컬렉션: qualitative_evaluation_results")
+    print(f"  - 문서 개수: 4개 (각 분기별)")
+    print(f"  - 문서 구조: type/evaluated_year/evaluated_quarter/user_count/users[]")
     print(f"  - MariaDB user_quarter_scores.qualitative_score 업데이트 완료")
     
     # MongoDB 연결 종료

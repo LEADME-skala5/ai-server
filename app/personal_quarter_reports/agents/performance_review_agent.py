@@ -44,7 +44,7 @@ class MongoDBManager:
     def __init__(self):
         self.mongodb_uri = f"mongodb://{MONGO_CONFIG['username']}:{MONGO_CONFIG['password']}@{MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/"
         self.database_name = MONGO_CONFIG["db_name"]
-        self.collection_name = "personal_quarter_reports"
+        self.output_collection_name = "final_performance_reviews"  # 출력 컬렉션
         self.client = None
         
         print(f"📋 MongoDB 설정 로드 완료: {MONGO_CONFIG['host']}:{MONGO_CONFIG['port']}/{self.database_name}")
@@ -60,28 +60,62 @@ class MongoDBManager:
             print(f"❌ MongoDB 연결 실패: {e}")
             return False
     
+    def get_user_data_from_collection(self, collection_name: str, user_id: int, year: int, quarter: int) -> Optional[Dict]:
+        """특정 컬렉션에서 사용자 데이터 조회"""
+        try:
+            if not self.client:
+                if not self.connect():
+                    return None
+            
+            db = self.client[self.database_name]
+            collection = db[collection_name]
+            
+            # type: "personal-quarter", evaluated_year, evaluated_quarter로 문서 조회
+            document = collection.find_one({
+                "type": "personal-quarter",
+                "evaluated_year": year,
+                "evaluated_quarter": quarter
+            })
+            
+            if not document or "users" not in document:
+                return None
+            
+            # 해당 사용자 데이터 찾기
+            for user_data in document["users"]:
+                if user_data.get("user_id") == user_id:
+                    return user_data
+            
+            return None
+            
+        except Exception as e:
+            print(f"❌ MongoDB 데이터 조회 실패 (collection: {collection_name}, user: {user_id}): {e}")
+            return None
+    
     def add_user_to_quarter_document(self, user_data: Dict) -> bool:
-        """분기별 문서에 사용자 데이터 추가"""
+        """분기별 문서에 사용자 데이터 추가 - 새로운 형식"""
         try:
             if not self.client:
                 if not self.connect():
                     return False
             
             db = self.client[self.database_name]
-            collection = db[self.collection_name]
-            
-            quarter_key = f"{user_data['year']}Q{user_data['quarter']}"
+            collection = db[self.output_collection_name]
             
             # 해당 분기 문서가 존재하는지 확인
             existing_doc = collection.find_one({
-                "quarter": quarter_key,
-                "data_type": "final_performance_review"
+                "type": "personal-quarter",
+                "evaluated_year": user_data['year'],
+                "evaluated_quarter": user_data['quarter']
             })
             
             if existing_doc:
                 # 기존 문서에 사용자 데이터 추가
                 collection.update_one(
-                    {"quarter": quarter_key, "data_type": "final_performance_review"},
+                    {
+                        "type": "personal-quarter",
+                        "evaluated_year": user_data['year'],
+                        "evaluated_quarter": user_data['quarter']
+                    },
                     {
                         "$push": {"users": user_data},
                         "$set": {"updated_at": datetime.now()},
@@ -92,10 +126,9 @@ class MongoDBManager:
             else:
                 # 새로운 분기 문서 생성
                 quarter_document = {
-                    "quarter": quarter_key,
-                    "year": user_data['year'],
-                    "quarter_num": user_data['quarter'],
-                    "data_type": "final_performance_review",
+                    "type": "personal-quarter",
+                    "evaluated_year": user_data['year'],
+                    "evaluated_quarter": user_data['quarter'],
                     "user_count": 1,
                     "users": [user_data],
                     "created_at": datetime.now(),
@@ -166,61 +199,27 @@ class PerformanceReviewAgent:
             "organization_id": None
         }
     
-    def get_user_data_from_quarter_document(self, quarter: str, data_type: str, user_id: int) -> Optional[Dict]:
-        """분기별 문서에서 특정 사용자 데이터 조회"""
-        try:
-            if not self.mongodb_manager.client:
-                if not self.mongodb_manager.connect():
-                    return None
-            
-            db = self.mongodb_manager.client[self.mongodb_manager.database_name]
-            collection = db[self.mongodb_manager.collection_name]
-            
-            # 해당 분기 및 데이터 타입 문서 조회
-            document = collection.find_one({
-                "quarter": quarter,
-                "data_type": data_type
-            })
-            
-            if not document or "users" not in document:
-                return None
-            
-            # 해당 사용자 데이터 찾기
-            for user_data in document["users"]:
-                if user_data.get("user_id") == user_id:
-                    return user_data
-            
-            return None
-            
-        except Exception as e:
-            print(f"❌ MongoDB 데이터 조회 실패 (quarter: {quarter}, type: {data_type}, user: {user_id}): {e}")
-            return None
-    
     def get_peer_evaluation_data(self, user_id: int, year: int, quarter: int) -> Optional[Dict]:
-        """동료평가 데이터 조회"""
-        quarter_key = f"{year}Q{quarter}"
-        return self.get_user_data_from_quarter_document(quarter_key, "peer_evaluation_results", user_id)
+        """동료평가 데이터 조회 - peer_evaluation_results 컬렉션"""
+        return self.mongodb_manager.get_user_data_from_collection("peer_evaluation_results", user_id, year, quarter)
     
     def get_qualitative_evaluation_data(self, user_id: int, year: int, quarter: int) -> Optional[Dict]:
-        """정성평가 데이터 조회"""
-        quarter_key = f"{year}Q{quarter}"
-        return self.get_user_data_from_quarter_document(quarter_key, "qualitative_evaluation_results", user_id)
+        """정성평가 데이터 조회 - qualitative_evaluation_results 컬렉션"""
+        return self.mongodb_manager.get_user_data_from_collection("qualitative_evaluation_results", user_id, year, quarter)
     
     def get_weekly_evaluation_data(self, user_id: int, year: int, quarter: int) -> Optional[Dict]:
-        """주간평가 데이터 조회"""
-        quarter_key = f"{year}Q{quarter}"
-        return self.get_user_data_from_quarter_document(quarter_key, "weekly_evaluation_results", user_id)
+        """주간평가 데이터 조회 - weekly_evaluation_results 컬렉션"""
+        return self.mongodb_manager.get_user_data_from_collection("weekly_evaluation_results", user_id, year, quarter)
     
     def get_ranking_data(self, user_id: int, year: int, quarter: int) -> Optional[Dict]:
-        """랭킹 데이터 조회"""
-        quarter_key = f"{year}Q{quarter}"
-        return self.get_user_data_from_quarter_document(quarter_key, "ranking_results", user_id)
+        """랭킹 데이터 조회 - ranking_results 컬렉션"""
+        return self.mongodb_manager.get_user_data_from_collection("ranking_results", user_id, year, quarter)
     
     def collect_all_evaluation_data(self, user_id: int, year: int, quarter: int) -> Dict:
         """모든 평가 데이터 수집"""
         print(f"🔍 사용자 ID {user_id}의 {year}Q{quarter} 평가 데이터 수집 중...")
         
-        # 각 평가 모듈의 결과 조회
+        # 각 평가 모듈의 결과 조회 (각기 다른 컬렉션에서)
         peer_data = self.get_peer_evaluation_data(user_id, year, quarter)
         qualitative_data = self.get_qualitative_evaluation_data(user_id, year, quarter)
         weekly_data = self.get_weekly_evaluation_data(user_id, year, quarter)
@@ -548,12 +547,12 @@ class PerformanceReviewAgent:
                 "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
             
-            # 6. MongoDB 저장
+            # 6. MongoDB 저장 (final_performance_reviews 컬렉션)
             if save_to_mongodb:
                 mongodb_save_success = self.mongodb_manager.add_user_to_quarter_document(result_data)
                 
                 if mongodb_save_success:
-                    print(f"✅ 사용자 ID {user_id} 성과 검토 분기별 문서에 추가 완료")
+                    print(f"✅ 사용자 ID {user_id} 성과 검토 final_performance_reviews 컬렉션에 추가 완료")
                 else:
                     print(f"❌ 사용자 ID {user_id} 성과 검토 MongoDB 저장 실패")
             
@@ -584,7 +583,7 @@ class PerformanceReviewAgent:
             
             # 성공/실패 여부 및 결과 출력
             if result["success"]:
-                print(f"✓ User {user_id}: 성과 검토 생성 완료 → 분기별 문서에 추가 완료")
+                print(f"✓ User {user_id}: 성과 검토 생성 완료 → final_performance_reviews 컬렉션에 저장 완료")
                 
                 # 터미널에서 결과 미리보기 출력
                 data = result["data"]
@@ -647,7 +646,7 @@ def process_single_quarter_performance_review(agent: PerformanceReviewAgent, use
     """단일 분기 성과 검토 처리"""
     print(f"\n=== {year}년 {quarter}분기 성과 검토 처리 시작 ===")
     print(f"처리할 사용자 수: {len(user_ids)}명")
-    print(f"MongoDB 저장 방식: {year}Q{quarter} 문서에 사용자 데이터 추가")
+    print(f"MongoDB 저장 방식: final_performance_reviews 컬렉션에 type: 'personal-quarter'로 구분")
     print("=" * 50)
     
     # 배치 처리 실행
@@ -658,7 +657,7 @@ def process_single_quarter_performance_review(agent: PerformanceReviewAgent, use
     failed_count = len(results) - successful_count
     
     print(f"\n=== {quarter}분기 성과 검토 처리 완료 ===")
-    print(f"성공: {successful_count}명 → {year}Q{quarter} 문서에 추가 완료")
+    print(f"성공: {successful_count}명 → final_performance_reviews 컬렉션에 저장 완료")
     print(f"실패: {failed_count}명")
     
     # 성공한 사용자들의 요약 통계
@@ -693,12 +692,16 @@ def main():
     # 평가 년도 설정
     evaluation_year = 2024
     
-    print(f"\n=== {evaluation_year}년 전체 분기 성과 검토 배치 처리 시작 (성과 요약만) ===")
-    print(f"저장 방식: 분기별 문서에 사용자 데이터 누적 추가")
-    print(f"저장 위치: MongoDB - {MONGO_CONFIG['db_name']}.personal_quarter_reports")
+    print(f"\n=== {evaluation_year}년 전체 분기 성과 검토 배치 처리 시작 ===")
+    print(f"입력 데이터 소스: 4개 분리된 컬렉션")
+    print(f"  - peer_evaluation_results")
+    print(f"  - qualitative_evaluation_results") 
+    print(f"  - weekly_evaluation_results")
+    print(f"  - ranking_results")
+    print(f"저장 위치: MongoDB - {MONGO_CONFIG['db_name']}.final_performance_reviews")
+    print(f"저장 방식: type: 'personal-quarter'로 구분")
     print(f"출력 형식:")
     print(f"  - performance_summary: 5문장으로 구성된 성과 요약")
-    print(f"  - 개선 제언 제거됨 (성과 요약만 생성)")
     print("=" * 60)
     
     # 처리할 사용자 ID 리스트 (1~100)
@@ -713,7 +716,7 @@ def main():
         all_quarters_results[f"Q{quarter}"] = quarter_result
         
         # 백업 파일도 저장
-        backup_filename = f"performance_review_summary_only_{evaluation_year}Q{quarter}_backup.json"
+        backup_filename = f"performance_review_final_{evaluation_year}Q{quarter}_backup.json"
         with open(backup_filename, 'w', encoding='utf-8') as f:
             json.dump(quarter_result, f, ensure_ascii=False, indent=2)
         print(f"📄 백업 파일 저장 완료: {backup_filename}")
@@ -722,7 +725,7 @@ def main():
         print("\n" + "=" * 60)
     
     # 전체 분기 통합 결과 출력
-    print(f"\n🎉 {evaluation_year}년 전체 분기 성과 검토 처리 완료! (성과 요약만)")
+    print(f"\n🎉 {evaluation_year}년 전체 분기 성과 검토 처리 완료!")
     print("=" * 60)
     
     total_processed = 0
@@ -731,20 +734,23 @@ def main():
             quarter_data = all_quarters_results[f"Q{quarter}"]
             successful = quarter_data["successful_count"]
             total_processed += successful
-            print(f"Q{quarter}: 성공 {successful}명 → {evaluation_year}Q{quarter} 문서에 저장 완료")
+            print(f"Q{quarter}: 성공 {successful}명 → type: 'personal-quarter', evaluated_year: {evaluation_year}, evaluated_quarter: {quarter}")
         else:
             print(f"Q{quarter}: 데이터 없음")
     
     print(f"\n🎉 처리 완료 요약:")
     print(f"  - 총 처리된 사용자: {total_processed}명")
+    print(f"  - 입력: 4개 분리된 컬렉션에서 데이터 수집")
+    print(f"  - 출력: final_performance_reviews 컬렉션")
     print(f"  - 출력 형식:")
-    print(f"    • performance_summary: 5문장 성과 요약 (이름으로 시작)")
-    print(f"    • growth_suggestions: 제거됨")
-    print(f"  - 저장 방식: 분기별 하나의 문서에 모든 사용자 데이터 저장")
+    print(f"    • performance_summary: 5문장 성과 요약")
+    print(f"    • data_sources: 데이터 수집 현황")
+    print(f"  - 저장 방식: type: 'personal-quarter'로 구분")
     print(f"  - 데이터베이스: {MONGO_CONFIG['db_name']}")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 총 문서 수: 4개 ({evaluation_year}Q1, {evaluation_year}Q2, {evaluation_year}Q3, {evaluation_year}Q4)")
-    print(f"  - AI 모델: GPT-4o (성과 요약만 생성)")
+    print(f"  - 컬렉션: final_performance_reviews")
+    print(f"  - 문서 개수: {len(all_quarters_results)}개 (각 분기별)")
+    print(f"  - 문서 구조: type/evaluated_year/evaluated_quarter/user_count/users[]")
+    print(f"  - AI 모델: GPT-4o")
     
     # 전체 분기별 상세 결과
     print(f"\n📋 분기별 상세 결과:")

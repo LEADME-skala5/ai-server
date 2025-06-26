@@ -32,7 +32,8 @@ class MongoDBManager:
     def __init__(self):
         self.mongodb_uri = f"mongodb://{os.getenv('MONGO_USER')}:{os.getenv('MONGO_PASSWORD')}@{os.getenv('MONGO_HOST')}:{os.getenv('MONGO_PORT')}/"
         self.database_name = os.getenv("MONGO_DB_NAME")
-        self.collection_name = "personal_quarter_reports"
+        self.input_collection_name = "weekly_evaluation_results"  # 입력 컬렉션
+        self.output_collection_name = "weekly_combination_results"  # 출력 컬렉션
         self.client = None
         
         print(f"📋 MongoDB 설정 로드 완료: {os.getenv('MONGO_HOST')}:{os.getenv('MONGO_PORT')}/{self.database_name}")
@@ -48,55 +49,95 @@ class MongoDBManager:
             print(f"❌ MongoDB 연결 실패: {e}")
             return False
     
-    def add_user_to_quarter_document(self, user_data: Dict) -> bool:
-        """분기별 문서에 사용자 데이터 추가"""
+    def get_quarter_evaluation_data(self, year: int, quarter: int) -> List[Dict]:
+        """특정 분기의 weekly_evaluation_results 데이터 조회"""
+        try:
+            if not self.client:
+                if not self.connect():
+                    return []
+            
+            db = self.client[self.database_name]
+            collection = db[self.input_collection_name]
+            
+            # data_type이 "personal-quarter"인 문서 조회
+            query = {"data_type": "personal-quarter"}
+            
+            document = collection.find_one(query)
+            
+            if document and "users" in document:
+                users_data = []
+                quarter_key = f"{year}Q{quarter}"
+                
+                # 각 사용자의 특정 분기 데이터 추출
+                for user_id, user_info in document["users"].items():
+                    if "quarters" in user_info and quarter_key in user_info["quarters"]:
+                        quarter_data = user_info["quarters"][quarter_key]
+                        
+                        # 사용자 데이터 구성
+                        user_data = {
+                            "user_id": int(user_id),
+                            "user_name": user_info.get("name", f"User_{user_id}"),
+                            "year": year,
+                            "quarter": quarter,
+                            "quarter_data": quarter_data,
+                            "team_goals": quarter_data.get("teamGoals", []),
+                            "total_activities": user_info.get("total_activities", 0)
+                        }
+                        users_data.append(user_data)
+                
+                print(f"✅ {year}년 {quarter}분기 사용자 데이터 {len(users_data)}개 조회 완료")
+                return users_data
+            else:
+                print(f"⚠️ {year}년 {quarter}분기 데이터 없음")
+                return []
+                
+        except Exception as e:
+            print(f"❌ MongoDB 데이터 조회 실패 ({year}년 {quarter}분기): {e}")
+            return []
+    
+    def save_quarter_combination_results(self, year: int, quarter: int, users_data: List[Dict]) -> bool:
+        """분기별 조합 결과를 weekly_combination_results에 저장"""
         try:
             if not self.client:
                 if not self.connect():
                     return False
             
             db = self.client[self.database_name]
-            collection = db[self.collection_name]
+            collection = db[self.output_collection_name]
             
-            quarter_key = f"{user_data['year']}Q{user_data['quarter']}"
-            
-            # 해당 분기 문서가 존재하는지 확인
+            # 기존 문서가 있는지 확인
             existing_doc = collection.find_one({
-                "quarter": quarter_key,
-                "data_type": "weekly_evaluation_results"
+                "type": "personal-quarter",
+                "evaluated_year": year,
+                "evaluated_quarter": quarter
             })
             
+            quarter_document = {
+                "type": "personal-quarter",
+                "evaluated_year": year,
+                "evaluated_quarter": quarter,
+                "user_count": len(users_data),
+                "users": users_data,
+                "updated_at": datetime.now()
+            }
+            
             if existing_doc:
-                # 기존 문서에 사용자 데이터 추가
-                collection.update_one(
-                    {"quarter": quarter_key, "data_type": "weekly_evaluation_results"},
-                    {
-                        "$push": {"users": user_data},
-                        "$set": {"updated_at": datetime.now()},
-                        "$inc": {"user_count": 1}
-                    }
+                # 기존 문서 업데이트
+                collection.replace_one(
+                    {"type": "personal-quarter", "evaluated_year": year, "evaluated_quarter": quarter},
+                    quarter_document
                 )
-                print(f"✅ 기존 분기 문서에 사용자 ID {user_data['user_id']} 추가 완료")
+                print(f"✅ {year}년 {quarter}분기 조합 결과 업데이트 완료 - {len(users_data)}명")
             else:
-                # 새로운 분기 문서 생성
-                quarter_document = {
-                    "quarter": quarter_key,
-                    "year": user_data['year'],
-                    "quarter_num": user_data['quarter'],
-                    "data_type": "weekly_evaluation_results",
-                    "user_count": 1,
-                    "users": [user_data],
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now()
-                }
-                
+                # 새 문서 생성
+                quarter_document["created_at"] = datetime.now()
                 result = collection.insert_one(quarter_document)
-                print(f"✅ 새로운 분기 문서 생성 및 사용자 ID {user_data['user_id']} 추가 완료 - Document ID: {result.inserted_id}")
+                print(f"✅ {year}년 {quarter}분기 조합 결과 신규 생성 완료 - {len(users_data)}명, Document ID: {result.inserted_id}")
             
             return True
             
         except Exception as e:
-            print(f"❌ MongoDB 사용자 데이터 추가 실패 (사용자 ID: {user_data.get('user_id', 'unknown')}): {e}")
+            print(f"❌ MongoDB 저장 실패 ({year}년 {quarter}분기): {e}")
             return False
     
     def close(self):
@@ -129,7 +170,7 @@ class WeeklyReportAgent:
         
         # MongoDB 매니저 초기화
         self.mongodb_manager = MongoDBManager()
-
+    
     def update_weekly_score_in_db(self, user_id: int, evaluation_year: int, evaluation_quarter: int, weekly_score: float):
         """user_quarter_scores 테이블의 weekly_score 컬럼 업데이트"""
         conn = pymysql.connect(**self.db_config)
@@ -151,302 +192,297 @@ class WeeklyReportAgent:
                            WHERE user_id = %s AND evaluation_year = %s AND evaluation_quarter = %s""",
                         (weekly_score, user_id, evaluation_year, evaluation_quarter)
                     )
-                    print(f"✅ user_quarter_scores weekly_score 업데이트 완료: 사용자 ID {user_id}, 점수 {weekly_score}")
+                    print(f"  💾 MariaDB 업데이트 완료: user_quarter_scores.weekly_score = {weekly_score}")
                 else:
                     # 새 데이터 추가
                     cur.execute(
-                        """INSERT INTO user_quarter_scores (user_id, evaluation_year, evaluation_quarter, weekly_score)
-                           VALUES (%s, %s, %s, %s)""",
+                        """INSERT INTO user_quarter_scores (user_id, evaluation_year, evaluation_quarter, weekly_score, created_at, updated_at)
+                           VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
                         (user_id, evaluation_year, evaluation_quarter, weekly_score)
                     )
-                    print(f"✅ user_quarter_scores 새 데이터 추가 완료: 사용자 ID {user_id}, 점수 {weekly_score}")
+                    print(f"  📝 MariaDB 신규 추가 완료: user_quarter_scores에 user_id {user_id} 데이터 생성")
+                    
         except Exception as e:
-            print(f"❌ DB 업데이트 오류: {e}")
+            print(f"  ❌ MariaDB 업데이트 오류 (user_id: {user_id}): {e}")
+        finally:
+            conn.close()
+    
+    def get_user_name(self, user_id: int) -> str:
+        """MariaDB users 테이블에서 사용자 이름 조회"""
+        conn = pymysql.connect(**self.db_config)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+                result = cur.fetchone()
+                
+                if result:
+                    return result['name']
+                else:
+                    print(f"⚠️ 사용자 ID {user_id}의 이름을 찾을 수 없음")
+                    return f"User_{user_id}"
+                    
+        except Exception as e:
+            print(f"❌ 사용자 이름 조회 오류 (ID: {user_id}): {e}")
+            return f"User_{user_id}"
         finally:
             conn.close()
 
-    def load_evaluation_data(self, input_path: str) -> Dict:
-        with open(input_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-    def create_weekly_report_json(self, evaluation_data: Dict, evaluation_year: int, evaluation_quarter: int, save_to_mongodb: bool = True) -> Dict:
-        emp_summary = evaluation_data['employee_summary']
-        basic_info = emp_summary['basic_info']
-        activity_categorization = emp_summary['activity_categorization']
-        pattern_analysis = emp_summary.get('performance_pattern_analysis', {})
-
-        # ✅ 정량 평가 점수 계산 (weeklyScore로 변경)
-        employee_id = basic_info.get('employee_number')
-        
-        # employee_id가 'EMP001' 형태인 경우 숫자만 추출
-        if isinstance(employee_id, str) and employee_id.startswith('EMP'):
-            try:
-                employee_id = int(employee_id[3:])  # 'EMP001' → 1
-            except ValueError:
-                logger.warning(f"employee_number 형식 오류: {employee_id}")
-                employee_id = 0
-        elif employee_id is not None:
-            employee_id = int(employee_id)
-        else:
-            employee_id = 0
-            
-        # period에서 년도와 분기 추출, 실패 시 기존 방식 사용
-        period = basic_info.get('period', '')
-        year, quarter = self._extract_year_quarter_from_period(period)
-        
-        # 파싱 실패 시 매개변수 값 사용
-        if year is None or quarter is None:
-            year = evaluation_year
-            quarter = evaluation_quarter
-
+    def generate_enhanced_activity_summary(self, user_data: Dict, user_name: str) -> str:
+        """MongoDB의 활동 데이터를 기반으로 강화된 요약문 생성"""
         try:
-            print(f"🔍 점수 계산 시도: employee_id={employee_id}, year={year}, quarter={quarter}")
-            avg_score = get_average_grade(employee_id, year, quarter)
-            workload_score = get_weighted_workload_score(employee_id, year, quarter)
-            weekly_score = calculate_final_score(avg_score, workload_score)
+            # 사용자 데이터에서 활동 정보 추출
+            quarter_data = user_data.get('quarter_data', {})
+            team_goals = user_data.get('team_goals', [])
+            total_activities = user_data.get('total_activities', 0)
             
-            # Decimal을 float로 변환
-            avg_score = float(avg_score) if avg_score is not None else 0.0
-            workload_score = float(workload_score) if workload_score is not None else 0.0
-            weekly_score = float(weekly_score) if weekly_score is not None else 0.0
+            # 팀 목표별 기여도 분석
+            active_goals = []
+            total_contributions = 0
             
-            print(f"📊 계산된 점수: avg={avg_score}, workload={workload_score}, weekly={weekly_score}")
+            for goal in team_goals:
+                if goal.get('contributionCount', 0) > 0:
+                    goal_name = goal.get('goalName', '')
+                    count = goal.get('contributionCount', 0)
+                    contents = goal.get('contents', [])
+                    
+                    # 각 content의 reference 정보 추출
+                    goal_details = []
+                    for content in contents:
+                        description = content.get('description', '')
+                        references = content.get('reference', [])
+                        
+                        # reference 정보를 문자열로 변환
+                        ref_labels = []
+                        for ref in references:
+                            label = ref.get('label', '')
+                            if label:
+                                ref_labels.append(label)
+                        
+                        goal_details.append({
+                            'description': description,
+                            'references': ref_labels
+                        })
+                    
+                    active_goals.append({
+                        'name': goal_name,
+                        'count': count,
+                        'details': goal_details
+                    })
+                    total_contributions += count
             
-            # ✅ DB에 weekly_score 업데이트
-            self.update_weekly_score_in_db(employee_id, year, quarter, weekly_score)
+            # 부서 정보
+            department = quarter_data.get('user', {}).get('department', '부서 미지정')
+            
+            prompt = f"""
+다음은 {user_name} 직원의 {user_data.get('year', 2024)}년 {user_data.get('quarter', 1)}분기 업무 활동 데이터입니다.
+
+■ 기본 정보:
+- 소속: {department}
+- 총 활동 수: {total_activities}건
+- 목표 기여 총합: {total_contributions}건
+
+■ 팀 목표별 기여 현황:
+"""
+            
+            if active_goals:
+                for goal in active_goals:
+                    prompt += f"- {goal['name']}: {goal['count']}건\n"
+                    for detail in goal['details']:
+                        desc = detail.get('description', '')
+                        refs = detail.get('references', [])
+                        if desc:
+                            prompt += f"  · {desc}\n"
+                            if refs:
+                                prompt += f"    (출처: {', '.join(refs)})\n"
+            else:
+                prompt += "- 활성화된 목표 없음\n"
+            
+            prompt += f"""
+위 데이터를 바탕으로 다음 요구사항에 맞는 업무 요약문을 작성해주세요:
+
+**작성 요구사항:**
+1. {user_name} 직원의 분기별 주요 업무 성과와 활동을 구체적으로 기술
+2. 팀 목표 기여도와 구체적인 업무 내용을 반영하되, **각 기여의 출처(주차별 보고서 등)를 반드시 포함**
+3. 업무 수행 역량과 성과에 대한 종합적 평가 포함
+4. 전문적이고 객관적인 어조로 작성 (200-250자 내외)
+5. "{user_name} 직원은 {user_data.get('year', 2024)}년 {user_data.get('quarter', 1)}분기 동안..." 형식으로 시작
+
+**중요 지침:**
+- 각 목표별 기여 건수를 언급할 때 반드시 해당 업무의 출처 정보를 함께 기재
+- 예: "CSP 파트너쉽 강화에 3건 기여(10월 1주차, 10월 4주차 보고서 기반)"
+- 구체적인 업무 내용과 그 근거가 되는 보고서를 명확히 연결
+
+**금지사항:**
+- 구체적인 점수나 등급 언급 금지
+- 추상적이거나 모호한 표현 지양
+- 출처 없는 기여도 언급 금지
+"""
+
+            response = self.client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": "당신은 HR 전문가로서 직원 평가 요약문을 작성하는 전문가입니다."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0,
+                max_tokens=500
+            )
+            
+            summary_text = response.choices[0].message.content.strip()
+            print(f"✅ {user_name} (ID: {user_data.get('user_id')}) 요약문 생성 완료")
+            print(f"📄 요약문 미리보기: {summary_text[:100]}{'...' if len(summary_text) > 100 else ''}")
+            return summary_text
             
         except Exception as e:
-            logger.warning(f"정량 점수 계산 실패: {e}")
-            avg_score = workload_score = weekly_score = 0.0
+            print(f"❌ 요약문 생성 실패 (사용자 ID: {user_data.get('user_id')}): {e}")
+            year = user_data.get('year', 2024)
+            quarter = user_data.get('quarter', 1)
+            return f"{user_name} 직원은 {year}년 {quarter}분기 동안 {user_data.get('total_activities', 0)}건의 업무를 수행했습니다."
 
-        employee_info = {
-            "name": basic_info['name'],
-            "department": basic_info.get('department', '클라우드 개발 3팀'),
-            "period": basic_info['period']
-        }
-
-        all_team_goals = [
-            "Cloud Professional 업무 진행 통한 BR/UR 개선",
-            "CSP 파트너쉽 강화 통한 원가개선",
-            "Cloud 마케팅 및 홍보 통한 대외 Cloud 고객확보",
-            "글로벌 사업 Tech-presales 진행"
-        ]
-
-        team_goals_data = []
-        key_achievements_data = []
-
-        for goal in all_team_goals:
-            matched = next((cat for cat in activity_categorization if cat['category'] == goal), None)
-            if matched:
-                count = matched.get('count', 0)
-                activities = matched.get('activities', [])
-                team_goals_data.append({
-                    "goalName": goal,
-                    "assigned": "배정" if count > 0 else "미배정",
-                    "content": ", ".join(activities) if activities else "-",
-                    "contributionCount": count
-                })
-                if count > 0:
-                    key_achievements_data.append(f"{goal}: {count}건")
-            else:
-                team_goals_data.append({
-                    "goalName": goal,
-                    "assigned": "미배정",
-                    "content": "-",
-                    "contributionCount": 0
-                })
-
-        total_activities = basic_info['total_activities']
-        active_goals = len([g for g in team_goals_data if g['contributionCount'] > 0])
-        coverage = (active_goals / 4) * 100
-
-        key_achievements_summary = [
-            f"총 수행 활동: {total_activities}건 (목표 대비 평가)",
-            f"목표 참여도: {active_goals}/4개 목표 참여 ({coverage:.0f}% 커버리지)"
-        ]
-        final_key_achievements = key_achievements_summary + key_achievements_data
-
-        # ✅ AI 요약 생성
-        quarterly_summary = self._generate_ai_quarterly_summary_text_only(
-            basic_info, activity_categorization, pattern_analysis
-        )
-
-        # 결과 데이터 구성
-        result_data = {
-            "user_id": employee_id,
-            "year": year,
-            "quarter": quarter,
-            "employee": employee_info,
-            "teamGoals": team_goals_data,
-            "keyAchievements": final_key_achievements,
-            "quarterlyPerformanceSummary": quarterly_summary,
-            "evaluationScore": {
-                "averageScore": avg_score,
-                "workloadScore": workload_score,
-                "weeklyScore": weekly_score
-            },
-            "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        # 분기별 문서에 사용자 데이터 추가
-        if save_to_mongodb:
-            mongodb_save_success = self.mongodb_manager.add_user_to_quarter_document(result_data)
-            
-            if mongodb_save_success:
-                print(f"✅ 사용자 ID {employee_id} 주간평가 분기별 문서에 추가 완료")
-            else:
-                print(f"❌ 사용자 ID {employee_id} 주간평가 MongoDB 저장 실패")
-        
-        result = {
-            "success": True,
-            "data": result_data
-        }
-        
-        return result
-
-    def process_single_quarter_weekly(self, input_files: List[Path], evaluation_year: int, evaluation_quarter: int):
-        """단일 분기 주간 평가 처리 - 분기별 문서에 사용자 데이터 추가"""
-        print(f"\n=== {evaluation_year}년 {evaluation_quarter}분기 주간 평가 처리 시작 ===")
-        print(f"처리할 파일 수: {len(input_files)}개")
-        print(f"MongoDB 저장 방식: {evaluation_year}Q{evaluation_quarter} 문서에 사용자 데이터 추가")
+    def process_single_quarter_combination(self, year: int, quarter: int) -> Dict:
+        """단일 분기 조합 결과 처리"""
+        print(f"\n=== {year}년 {quarter}분기 주간 평가 조합 처리 시작 ===")
+        print(f"입력: MongoDB weekly_evaluation_results (data_type: personal-quarter)")
+        print(f"출력: MongoDB weekly_combination_results")
         print("=" * 50)
         
-        results = []
+        # 1. MongoDB에서 해당 분기 데이터 조회
+        quarter_users_data = self.mongodb_manager.get_quarter_evaluation_data(year, quarter)
+        
+        if not quarter_users_data:
+            print(f"⚠️ {year}년 {quarter}분기 데이터가 없습니다.")
+            return {
+                "quarter": quarter,
+                "successful_count": 0,
+                "failed_count": 0,
+                "average_score": 0
+            }
+        
+        print(f"처리할 사용자 수: {len(quarter_users_data)}명")
+        
+        # 2. 각 사용자별로 처리
+        processed_users = []
         successful_count = 0
         failed_count = 0
+        weekly_scores = []
         
-        for i, file in enumerate(input_files, 1):
-            # 진행률 표시 (매 10개 파일마다)
-            if i % 10 == 0 or i == len(input_files):
-                print(f"처리 진행률: {i}/{len(input_files)} ({i/len(input_files)*100:.1f}%)")
+        for i, user_data in enumerate(quarter_users_data, 1):
+            # 진행률 표시 (매 10명마다)
+            if i % 10 == 0 or i == len(quarter_users_data):
+                print(f"처리 진행률: {i}/{len(quarter_users_data)} ({i/len(quarter_users_data)*100:.1f}%)")
             
             try:
-                data = self.load_evaluation_data(str(file))
-                result = self.create_weekly_report_json(data, evaluation_year, evaluation_quarter, save_to_mongodb=True)
-                results.append(result)
-                successful_count += 1
+                user_id = user_data.get('user_id')
+                if not user_id:
+                    print(f"❌ 사용자 ID가 없는 데이터 건너뜀")
+                    failed_count += 1
+                    continue
                 
-                emp_id = result["data"]["user_id"]
-                weekly_score = result["data"]["evaluationScore"]["weeklyScore"]
-                print(f"✓ User {emp_id}: weekly_score={weekly_score:.2f} → 분기별 문서에 추가 완료")
+                # 3. 사용자 이름 조회 (MariaDB에서 실제 이름 가져오기)
+                user_name = self.get_user_name(user_id)
+                
+                # 4. weekly_score 계산 (weekly_evaluations.py 사용)
+                try:
+                    print(f"🔍 점수 계산 시작: user_id={user_id}, year={year}, quarter={quarter}")
+                    
+                    avg_score = get_average_grade(user_id, year, quarter)
+                    print(f"  - 평균 점수: {avg_score} (타입: {type(avg_score)})")
+                    
+                    workload_score = get_weighted_workload_score(user_id, year, quarter)
+                    print(f"  - 업무량 점수: {workload_score} (타입: {type(workload_score)})")
+                    
+                    weekly_score = calculate_final_score(avg_score, workload_score)
+                    print(f"  - 최종 점수: {weekly_score} (타입: {type(weekly_score)})")
+                    
+                    # Decimal을 float로 변환
+                    avg_score = float(avg_score) if avg_score is not None else 0.0
+                    workload_score = float(workload_score) if workload_score is not None else 0.0
+                    weekly_score = float(weekly_score) if weekly_score is not None else 0.0
+                    
+                    print(f"  - 변환된 최종 점수: {weekly_score}")
+                    
+                    if weekly_score == 0.0:
+                        print(f"  ⚠️ 점수가 0 - weekly_evaluations 테이블에 user_id {user_id}의 {year}년 {quarter}분기 데이터가 없을 수 있습니다")
+                    
+                except Exception as score_error:
+                    print(f"❌ 사용자 ID {user_id} 점수 계산 실패: {score_error}")
+                    import traceback
+                    traceback.print_exc()
+                    weekly_score = 0.0
+                
+                # 5. AI 강화된 요약문 생성 (실제 이름 사용)
+                weekly_summary_text = self.generate_enhanced_activity_summary(user_data, user_name)
+                
+                # 6. 결과 데이터 구성
+                processed_user = {
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "year": year,
+                    "quarter": quarter,
+                    "weekly_score": weekly_score,
+                    "weekly_summary_text": weekly_summary_text
+                }
+                
+                # 7. MariaDB user_quarter_scores 테이블에 weekly_score 업데이트
+                self.update_weekly_score_in_db(user_id, year, quarter, weekly_score)
+                
+                # 생성된 요약문을 터미널에 출력
+                print(f"\n=== 🎯 {user_name} (ID: {user_id}) 요약문 ===")
+                print(f"📊 Weekly Score: {weekly_score:.2f}")
+                print(f"📝 요약문:")
+                print("-" * 60)
+                print(weekly_summary_text)
+                print("-" * 60)
+                
+                processed_users.append(processed_user)
+                successful_count += 1
+                weekly_scores.append(weekly_score)
+                
+                print(f"✓ {user_name} (ID: {user_id}): weekly_score={weekly_score:.2f} → 처리 완료")
+                print(f"  📋 팀 목표 기여: {len([g for g in user_data.get('team_goals', []) if g.get('contributionCount', 0) > 0])}/{len(user_data.get('team_goals', []))}개 활성화")
                 
             except Exception as e:
-                print(f"❌ {file.name} 처리 실패: {e}")
-                results.append({
-                    "success": False,
-                    "message": f"파일 처리 실패: {str(e)}",
-                    "data": None
-                })
+                print(f"❌ 사용자 ID {user_data.get('user_id', 'unknown')} 처리 실패: {e}")
                 failed_count += 1
         
-        # 통계 계산
-        print(f"\n=== {evaluation_quarter}분기 주간 평가 처리 완료 ===")
-        print(f"성공: {successful_count}명 → {evaluation_year}Q{evaluation_quarter} 문서에 추가 완료")
+        # 7. MongoDB에 저장
+        if processed_users:
+            save_success = self.mongodb_manager.save_quarter_combination_results(year, quarter, processed_users)
+            if save_success:
+                print(f"📊 MongoDB 저장 완료: weekly_combination_results.{year}Q{quarter}")
+            else:
+                print(f"❌ {year}년 {quarter}분기 MongoDB 저장 실패")
+        
+        # 8. MariaDB 업데이트 통계
+        print(f"\n💾 MariaDB user_quarter_scores 업데이트:")
+        print(f"  - {year}년 {quarter}분기 총 {successful_count}명의 weekly_score 업데이트 완료")
+        if failed_count > 0:
+            print(f"  - 실패: {failed_count}명")
+        
+        # 통계 계산 및 출력
+        print(f"\n=== {quarter}분기 조합 처리 완료 ===")
+        print(f"성공: {successful_count}명 → weekly_combination_results에 저장 완료")
         print(f"실패: {failed_count}명")
         
         avg_score = None
-        if successful_count > 0:
-            scores = [r["data"]["evaluationScore"]["weeklyScore"] for r in results if r["success"]]
-            if scores:
-                avg_score = sum(scores) / len(scores)
-                max_score = max(scores)
-                min_score = min(scores)
-                
-                print(f"평균 점수: {avg_score:.2f}")
-                print(f"최고 점수: {max_score:.2f}")
-                print(f"최저 점수: {min_score:.2f}")
-        
-        # 실패한 파일 개수만 출력
-        if failed_count > 0:
-            print(f"처리 실패한 파일: {failed_count}개")
+        if weekly_scores:
+            avg_score = sum(weekly_scores) / len(weekly_scores)
+            max_score = max(weekly_scores)
+            min_score = min(weekly_scores)
+            
+            print(f"평균 weekly_score: {avg_score:.2f}")
+            print(f"최고 weekly_score: {max_score:.2f}")
+            print(f"최저 weekly_score: {min_score:.2f}")
         
         return {
-            "quarter": evaluation_quarter,
+            "quarter": quarter,
             "successful_count": successful_count,
             "failed_count": failed_count,
             "average_score": round(avg_score, 2) if avg_score else 0
         }
 
-    def _generate_ai_quarterly_summary_text_only(self, basic_info: Dict, activity_categorization: List, pattern_analysis: Dict) -> str:
-        prompt = f"""
-다음 직원의 분기 성과 데이터를 분석하여 전문적인 성과요약 텍스트를 작성해주세요.
-
-직원 정보:
-- 이름: {basic_info['name']}
-- 평가 기간: {basic_info['period']}
-- 총 활동 수: {basic_info['total_activities']}건
-
-활동 현황:
-"""
-        for cat in activity_categorization:
-            prompt += f"- {cat['category']}: {cat['count']}건\n"
-            if cat.get('activities'):
-                prompt += f"  주요 활동: {', '.join(cat['activities'][:2])}\n"
-            prompt += f"  기여도: {cat.get('impact', '중간')}\n"
-
-        prompt += f"""
-강점: {', '.join(pattern_analysis.get('strengths', []))}
-개선점: {', '.join(pattern_analysis.get('improvements', []))}
-
-요구사항:
-- 전문적인 성과요약 작성 (200~300자)
-- "{basic_info['name']} 직원은 {basic_info['period']} 기간 동안..." 으로 시작
-"""
-        try:
-            res = self.client.chat.completions.create(
-                model="gpt-4-turbo",
-                messages=[
-                    {"role": "system", "content": "당신은 HR 전문가입니다."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                max_tokens=500
-            )
-            return res.choices[0].message.content.strip()
-        except Exception as e:
-            logger.warning(f"AI 요약 실패: {e}")
-            return f"{basic_info['name']} 직원은 {basic_info['period']} 기간 동안 총 {basic_info['total_activities']}건의 활동을 수행했습니다."
-
-    def _extract_year_quarter_from_period(self, period: str) -> tuple:
-        """period 문자열에서 년도와 분기를 추출
-        예: "2024-01-07 ~ 2024-03-27" → (2024, 1)
-        파싱 실패 시 (None, None) 반환
-        """
-        try:
-            # period에서 시작 날짜 추출
-            if ' ~ ' in period:
-                start_date_str = period.split(' ~ ')[0].strip()
-            else:
-                start_date_str = period.strip()
-            
-            # 날짜 파싱 (YYYY-MM-DD 형식)
-            if '-' in start_date_str and len(start_date_str) >= 7:
-                year_str, month_str = start_date_str.split('-')[:2]
-                year = int(year_str)
-                month = int(month_str)
-                
-                # 월을 분기로 변환
-                if 1 <= month <= 3:
-                    quarter = 1
-                elif 4 <= month <= 6:
-                    quarter = 2
-                elif 7 <= month <= 9:
-                    quarter = 3
-                elif 10 <= month <= 12:
-                    quarter = 4
-                else:
-                    return None, None
-                    
-                return year, quarter
-            else:
-                return None, None
-                
-        except (ValueError, IndexError) as e:
-            logger.warning(f"period 파싱 오류: {period}, {e}")
-            return None, None
-
 def main():
-    print("🚀 주간 평가 보고서 생성 시작 (분기별 문서 저장 방식)")
+    print("🚀 주간 평가 조합 결과 생성 시작 (MongoDB 기반)")
     print("=" * 60)
     
     # 에이전트 초기화
@@ -455,29 +491,13 @@ def main():
     # MongoDB 연결 테스트
     print("🔌 MongoDB 연결 테스트...")
     if not agent.mongodb_manager.connect():
-        print("❌ MongoDB 연결 실패. 로컬 저장만 진행합니다.")
-    
-    # 입력 파일 위치
-    input_dir = Path("./output")
-    output_dir = Path("./reports")
-    output_dir.mkdir(exist_ok=True)
-    
-    # 입력 파일 검색
-    files = list(input_dir.glob("evaluation_EMP*.json"))
-    if not files:
-        print("❌ ./output 디렉토리에 evaluation_EMP*.json 파일이 없습니다.")
+        print("❌ MongoDB 연결 실패. 프로그램을 종료합니다.")
         return
     
-    print(f"발견된 파일 수: {len(files)}개")
-    
-    print(f"\n=== 2024년 전체 분기 주간 평가 배치 처리 시작 (분기별 문서 저장) ===")
-    print(f"저장 방식: 분기별 문서에 사용자 데이터 누적 추가")
-    print(f"저장 위치: MongoDB - {os.getenv('MONGO_DB_NAME')}.personal_quarter_reports")
-    print(f"문서 구조:")
-    print(f"  - 2024Q1 문서: Q1 모든 사용자 데이터")
-    print(f"  - 2024Q2 문서: Q2 모든 사용자 데이터")
-    print(f"  - 2024Q3 문서: Q3 모든 사용자 데이터")
-    print(f"  - 2024Q4 문서: Q4 모든 사용자 데이터")
+    print(f"\n=== 2024년 전체 분기 조합 처리 시작 ===")
+    print(f"입력 소스: MongoDB - {os.getenv('MONGO_DB_NAME')}.weekly_evaluation_results")
+    print(f"출력 대상: MongoDB - {os.getenv('MONGO_DB_NAME')}.weekly_combination_results")
+    print(f"처리 방식: 분기별 문서에 모든 사용자 조합 결과 저장")
     print("=" * 60)
     
     # 전체 결과 저장용
@@ -485,20 +505,14 @@ def main():
     
     # 4개 분기 모두 처리
     for quarter in [1, 2, 3, 4]:
-        quarter_result = agent.process_single_quarter_weekly(files, 2024, quarter)
+        quarter_result = agent.process_single_quarter_combination(2024, quarter)
         all_quarters_results[f"Q{quarter}"] = quarter_result
-        
-        # 로컬 파일도 저장 (백업용)
-        backup_filename = f"weekly_evaluation_results_2024Q{quarter}_backup.json"
-        with open(backup_filename, 'w', encoding='utf-8') as f:
-            json.dump(quarter_result, f, ensure_ascii=False, indent=2)
-        print(f"📄 백업 파일 저장 완료: {backup_filename}")
         
         # 분기 간 구분을 위한 여백
         print("\n" + "=" * 60)
     
     # 전체 분기 통합 결과 출력
-    print(f"\n=== 2024년 전체 분기 주간 평가 처리 완료 ===")
+    print(f"\n=== 2024년 전체 분기 조합 처리 완료 ===")
     
     total_processed = 0
     for quarter in [1, 2, 3, 4]:
@@ -506,18 +520,45 @@ def main():
             quarter_data = all_quarters_results[f"Q{quarter}"]
             successful = quarter_data["successful_count"]
             total_processed += successful
-            print(f"Q{quarter}: 성공 {successful}명 → 2024Q{quarter} 문서에 저장 완료")
+            avg_score = quarter_data["average_score"]
+            print(f"Q{quarter}: 성공 {successful}명, 평균 점수 {avg_score}")
         else:
             print(f"Q{quarter}: 데이터 없음")
     
     print(f"\n🎉 처리 완료 요약:")
     print(f"  - 총 처리된 사용자: {total_processed}명")
-    print(f"  - 저장 방식: 분기별 하나의 문서에 모든 사용자 데이터 저장")
+    print(f"  - 입력: weekly_evaluation_results (data_type: personal-quarter)")
+    print(f"  - 출력: weekly_combination_results (type: personal-quarter)")
+    print(f"  - 저장 방식: 분기별 문서에 모든 사용자 조합 결과 저장")
     print(f"  - 데이터베이스: {os.getenv('MONGO_DB_NAME')}")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 총 문서 수: 4개 (2024Q1, 2024Q2, 2024Q3, 2024Q4)")
-    print(f"  - 문서 구조: quarter/year/quarter_num/data_type/user_count/users[]")
-    print(f"  - MariaDB user_quarter_scores.weekly_score 업데이트 완료")
+    print(f"  - 총 문서 수: 4개 (2024년 1,2,3,4분기)")
+    print(f"  - 💾 MariaDB user_quarter_scores.weekly_score 업데이트: 총 {total_processed}명")
+    
+    # MariaDB 업데이트 결과 검증
+    print(f"\n🔍 MariaDB 업데이트 검증:")
+    try:
+        conn = pymysql.connect(**agent.db_config)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT 
+                    evaluation_quarter,
+                    COUNT(*) as updated_count,
+                    AVG(weekly_score) as avg_score,
+                    MIN(weekly_score) as min_score,
+                    MAX(weekly_score) as max_score
+                FROM user_quarter_scores 
+                WHERE evaluation_year = 2024 AND weekly_score IS NOT NULL
+                GROUP BY evaluation_quarter
+                ORDER BY evaluation_quarter
+            """)
+            results = cur.fetchall()
+            
+            for row in results:
+                quarter, count, avg_score, min_score, max_score = row
+                print(f"  Q{quarter}: {count}명 업데이트, 평균 {avg_score:.2f} (범위: {min_score:.2f}~{max_score:.2f})")
+        conn.close()
+    except Exception as e:
+        print(f"  ❌ 검증 실패: {e}")
     
     # MongoDB 연결 종료
     agent.mongodb_manager.close()
