@@ -23,18 +23,18 @@ logger = logging.getLogger(__name__)
 
 class WeeklyReportEvaluationAgent:
     def __init__(self, 
-                 openai_api_key: Optional[str] = None,
-                 pinecone_api_key: Optional[str] = None,
-                 model: str = "gpt-4-turbo",
-                 output_path: str = "./output"):
+                openai_api_key: Optional[str] = None,
+                pinecone_api_key: Optional[str] = None,
+                model: Optional[str] = None,
+                output_path: Optional[str] = None):
         """
         AI 기반 주간 보고서 평가 에이전트 (Pinecone + MariaDB 버전)
         
         Args:
-            openai_api_key: OpenAI API 키
-            pinecone_api_key: Pinecone API 키
-            model: 사용할 LLM 모델명
-            output_path: 결과 파일들을 저장할 경로
+            openai_api_key: OpenAI API 키 (기본값: 환경변수에서 가져옴)
+            pinecone_api_key: Pinecone API 키 (기본값: 환경변수에서 가져옴)
+            model: 사용할 LLM 모델명 (기본값: 환경변수에서 가져옴)
+            output_path: 결과 파일들을 저장할 경로 (기본값: 환경변수에서 가져옴)
         """
         # OpenAI API 키 설정
         final_openai_key = openai_api_key or os.getenv("OPENAI_API_KEY")
@@ -46,26 +46,31 @@ class WeeklyReportEvaluationAgent:
         if not final_pinecone_key:
             raise ValueError("Pinecone API 키가 설정되지 않았습니다.")
         
+        # 모델 설정 (환경변수에서 기본값 가져오기)
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4-turbo")
+        
+        # 출력 경로 설정 (환경변수에서 기본값 가져오기)
+        output_path = output_path or os.getenv("OUTPUT_PATH", "./output")
+        
         self.openai_client = openai.OpenAI(api_key=final_openai_key)
-        self.model = model
         self.output_path = Path(output_path)
         
         # Pinecone 초기화
         self.pc = Pinecone(api_key=final_pinecone_key)
-        self.pinecone_index_name = "skore-20250624-144422"
+        self.pinecone_index_name = os.getenv("PINECONE_INDEX_NAME", "skore-20250624-144422")
         self.index = self.pc.Index(self.pinecone_index_name)
         
         # 네임스페이스 자동 감지
         self.namespace = self._detect_namespace()
         
-        # MariaDB 연결 정보
+        # MariaDB 연결 정보 (환경변수에서 가져오기)
         self.db_config = {
-            'host': '13.209.110.151',
-            'port': 27017,
-            'user': 'root',
-            'password': 'root',
-            'database': 'skala',
-            'charset': 'utf8mb4'
+            'host': os.getenv("DB_HOST", '13.209.110.151'),
+            'port': int(os.getenv("DB_PORT", 27017)),
+            'user': os.getenv("DB_USER", 'root'),
+            'password': os.getenv("DB_PASSWORD", 'root'),
+            'database': os.getenv("DB_DATABASE", 'skala'),
+            'charset': os.getenv("DB_CHARSET", 'utf8mb4')
         }
         
         # 데이터 저장소
@@ -80,9 +85,10 @@ class WeeklyReportEvaluationAgent:
         # 출력 디렉토리 생성
         self.output_path.mkdir(exist_ok=True)
         
-        logger.info(f"WeeklyReportEvaluationAgent 초기화 완료 - 모델: {model}")
+        logger.info(f"WeeklyReportEvaluationAgent 초기화 완료 - 모델: {self.model}")
         logger.info(f"Pinecone 인덱스: {self.pinecone_index_name}")
         logger.info(f"사용 네임스페이스: {self.namespace}")
+        logger.info(f"데이터베이스: {self.db_config['host']}:{self.db_config['port']}/{self.db_config['database']}")
     
     def _detect_namespace(self) -> str:
         """Pinecone 네임스페이스를 자동 감지합니다."""
@@ -1405,23 +1411,37 @@ def main():
     print("🎯 === 최종 주간 보고서 평가 시스템 ===")
     print("📋 Pinecone + MariaDB 기반 AI 평가 시스템")
     
-    # API 키 설정
-    openai_key = "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"
-    pinecone_key = "pcsk_5Wcu2A_7QAdTAjfmSYxwxc2sfiZ7G1bhmi9qy6J2KXL1hUfNcoLQ3xGdavA7S4E9DEqpmH"
+    # 환경변수에서 API 키 가져오기
+    openai_key = os.getenv("OPENAI_API_KEY")
+    pinecone_key = os.getenv("PINECONE_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-4-turbo")  # 기본값 설정
+    output_path = os.getenv("OUTPUT_PATH", "./output")  # 기본값 설정
+    
+    # API 키 검증
+    if not openai_key:
+        print("❌ OPENAI_API_KEY 환경변수가 설정되지 않았습니다.")
+        print("💡 .env 파일을 확인하거나 환경변수를 설정해주세요.")
+        return
+    
+    if not pinecone_key:
+        print("❌ PINECONE_API_KEY 환경변수가 설정되지 않았습니다.")
+        print("💡 .env 파일을 확인하거나 환경변수를 설정해주세요.")
+        return
     
     try:
-        print(f"\n🤖 시스템 초기화 중... (모델: gpt-4-turbo)")
+        print(f"\n🤖 시스템 초기화 중... (모델: {model})")
         
         # 에이전트 초기화
         agent = WeeklyReportEvaluationAgent(
             openai_api_key=openai_key,
             pinecone_api_key=pinecone_key,
-            model="gpt-4-turbo",
-            output_path="./output"
+            model=model,
+            output_path=output_path
         )
         
         print("✅ 시스템 초기화 완료!")
         
+        # 나머지 메뉴 코드는 동일...
         # 사용자 메뉴
         while True:
             print(f"\n🎯 === 메인 메뉴 ===")
@@ -1435,7 +1455,7 @@ def main():
             
             if choice == "1":
                 print("\n📋 모든 사용자 목록 조회 중...")
-                available_users = agent.get_available_user_ids()  # force_refresh 파라미터 제거
+                available_users = agent.get_available_user_ids()
                 print(f"\n📊 총 {len(available_users)}명의 사용자:")
                 for i, user_id in enumerate(available_users, 1):
                     print(f"  {i:2d}. User {user_id}")
