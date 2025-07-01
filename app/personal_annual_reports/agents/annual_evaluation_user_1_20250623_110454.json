@@ -1,0 +1,44 @@
+{
+  "success": true,
+  "data": {
+    "type": "individual-year-end",
+    "title": "2024 연말 성과 리포트",
+    "employee": {
+      "name": "류수연",
+      "department": "AT서비스2본부",
+      "job": "AI 인프라 운영",
+      "startDate": "2024-01-01",
+      "endDate": "2024-12-27"
+    },
+    "evaluation": {
+      "user_id": 1,
+      "year": 2024,
+      "quarter": "Annual",
+      "peer_evaluation_score": 3.7,
+      "calculation_method": "annual_weighted_average",
+      "peerFeedback": [
+        {
+          "type": "positive",
+          "keywords": [
+            "열정/몰입",
+            "긍정에너지",
+            "회복탄력성",
+            "책임감",
+            "주인의식"
+          ]
+        },
+        {
+          "type": "negative",
+          "keywords": [
+            "부정적 태도",
+            "비관적",
+            "의욕 없음",
+            "자기변명",
+            "수동적 자세"
+          ]
+        }
+      ],
+      "finalComment": "류수연님은 2024년 동료평가를 통해 열정/몰입과 긍정에너지, 그리고 회복탄력성 등의 강점을 보여주셨습니다. 그러나 부정적인 태도와 비관적인 면모가 보이는 점이 개선이 필요합니다. 늘 자신의 성장을 위해 노력하며 일시적인 부진을 극복하시는 모습이 격려됩니다. 앞으로도 지속적인 발전으로 더 큰 성과를 이루시길 기대합니다."
+    }
+  }
+}

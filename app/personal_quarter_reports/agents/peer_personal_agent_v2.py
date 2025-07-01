@@ -4,11 +4,6 @@ from decimal import Decimal
 from typing import Dict, List, Tuple
 import logging
 from datetime import datetime
-import os
-
-# .env 파일 로드
-from dotenv import load_dotenv
-load_dotenv()
 
 # MongoDB 추가 import
 from pymongo import MongoClient
@@ -31,18 +26,10 @@ class MongoDBManager:
     """MongoDB 연결 및 관리 클래스"""
     
     def __init__(self):
-        # .env에서 MongoDB 설정 로드
-        self.host = os.getenv("MONGO_HOST")
-        self.port = int(os.getenv("MONGO_PORT"))
-        self.username = os.getenv("MONGO_USER")
-        self.password = os.getenv("MONGO_PASSWORD")
-        self.database_name = os.getenv("MONGO_DB_NAME")
-        
-        self.mongodb_uri = f"mongodb://{self.username}:{self.password}@{self.host}:{self.port}/"
-        self.collection_name = "peer_evaluation_results"  # 변경된 컬렉션명
+        self.mongodb_uri = "mongodb://root:root@13.209.110.151:27017/"
+        self.database_name = "skala"
+        self.collection_name = "personal_quarter_reports"
         self.client = None
-        
-        print(f"📋 MongoDB 설정 로드 완료: {self.host}:{self.port}/{self.database_name}")
     
     def connect(self):
         """MongoDB 연결"""
@@ -56,8 +43,8 @@ class MongoDBManager:
             print(f"❌ MongoDB 연결 실패: {e}")
             return False
     
-    def add_user_to_quarter_document(self, user_data: Dict) -> bool:
-        """분기별 문서에 사용자 데이터 추가 - 새로운 형식"""
+    def save_peer_data(self, quarter_data: Dict) -> bool:
+        """동료평가 데이터를 MongoDB에 저장"""
         try:
             if not self.client:
                 if not self.connect():
@@ -66,47 +53,24 @@ class MongoDBManager:
             db = self.client[self.database_name]
             collection = db[self.collection_name]
             
-            # 해당 분기 문서가 존재하는지 확인
-            existing_doc = collection.find_one({
-                "type": "personal-quarter",
-                "evaluated_year": user_data['year'],
-                "evaluated_quarter": user_data['quarter']
-            })
+            # peer 구조로 감싸기
+            peer_document = {
+                "peer": quarter_data,
+                "created_at": datetime.now(),
+                "updated_at": datetime.now(),
+                "data_type": "peer_evaluation_results",
+                "quarter": quarter_data.get("meta", {}).get("evaluation_period", "unknown")
+            }
             
-            if existing_doc:
-                # 기존 문서에 사용자 데이터 추가
-                collection.update_one(
-                    {
-                        "type": "personal-quarter",
-                        "evaluated_year": user_data['year'],
-                        "evaluated_quarter": user_data['quarter']
-                    },
-                    {
-                        "$push": {"users": user_data},
-                        "$set": {"updated_at": datetime.now()},
-                        "$inc": {"user_count": 1}
-                    }
-                )
-                print(f"✅ 기존 분기 문서에 사용자 ID {user_data['user_id']} 추가 완료")
-            else:
-                # 새로운 분기 문서 생성
-                quarter_document = {
-                    "type": "personal-quarter",
-                    "evaluated_year": user_data['year'],
-                    "evaluated_quarter": user_data['quarter'],
-                    "user_count": 1,
-                    "users": [user_data],
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now()
-                }
-                
-                result = collection.insert_one(quarter_document)
-                print(f"✅ 새로운 분기 문서 생성 및 사용자 ID {user_data['user_id']} 추가 완료 - Document ID: {result.inserted_id}")
+            result = collection.insert_one(peer_document)
+            print(f"✅ MongoDB 저장 완료 - Document ID: {result.inserted_id}")
+            print(f"   분기: {peer_document['quarter']}")
+            print(f"   컬렉션: {self.database_name}.{self.collection_name}")
             
             return True
             
         except Exception as e:
-            print(f"❌ MongoDB 사용자 데이터 추가 실패 (사용자 ID: {user_data.get('user_id', 'unknown')}): {e}")
+            print(f"❌ MongoDB 저장 실패: {e}")
             return False
     
     def close(self):
@@ -117,18 +81,14 @@ class MongoDBManager:
 
 class PeerEvaluationSystem:
     def __init__(self, openai_api_key: str):
-        # .env에서 MariaDB 설정 로드
         self.db_config = {
-            'host': os.getenv("DB_HOST"),
-            'port': int(os.getenv("DB_PORT")),
-            'user': os.getenv("DB_USER"),
-            'password': os.getenv("DB_PASSWORD"),
-            'database': os.getenv("DB_NAME")
+            'host': '13.209.110.151',
+            'port': 3306,
+            'user': 'root',
+            'password': 'root',
+            'database': 'skala'
         }
-        
-        print(f"📋 MariaDB 설정 로드 완료: {self.db_config['host']}:{self.db_config['port']}/{self.db_config['database']}")
-        
-        self.llm = OpenAI(api_key=openai_api_key, temperature=0.7, max_tokens=1500)
+        self.llm = OpenAI(api_key=openai_api_key, temperature=0.7,max_tokens=1500)
         
     def get_db_connection(self):
         """DB 연결"""
@@ -167,47 +127,6 @@ class PeerEvaluationSystem:
         conn.close()
         
         return results
-
-    def update_peer_score_in_db(self, user_id: int, evaluation_year: int, evaluation_quarter: int, peer_score: float):
-        """user_quarter_scores 테이블의 peer_score 컬럼 업데이트"""
-        conn = self.get_db_connection()
-        cursor = conn.cursor()
-        
-        try:
-            # 기존 데이터 확인
-            check_query = """
-            SELECT id FROM user_quarter_scores 
-            WHERE user_id = %s AND evaluation_year = %s AND evaluation_quarter = %s
-            """
-            cursor.execute(check_query, (user_id, evaluation_year, evaluation_quarter))
-            existing_record = cursor.fetchone()
-            
-            if existing_record:
-                # 기존 데이터 업데이트
-                update_query = """
-                UPDATE user_quarter_scores 
-                SET peer_score = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE user_id = %s AND evaluation_year = %s AND evaluation_quarter = %s
-                """
-                cursor.execute(update_query, (peer_score, user_id, evaluation_year, evaluation_quarter))
-                print(f"✅ user_quarter_scores peer_score 업데이트 완료: 사용자 ID {user_id}, 점수 {peer_score}")
-            else:
-                # 새 데이터 추가
-                insert_query = """
-                INSERT INTO user_quarter_scores (user_id, evaluation_year, evaluation_quarter, peer_score)
-                VALUES (%s, %s, %s, %s)
-                """
-                cursor.execute(insert_query, (user_id, evaluation_year, evaluation_quarter, peer_score))
-                print(f"✅ user_quarter_scores 새 데이터 추가 완료: 사용자 ID {user_id}, 점수 {peer_score}")
-            
-            conn.commit()
-            
-        except Exception as e:
-            print(f"❌ DB 업데이트 오류: {e}")
-            conn.rollback()
-        finally:
-            cursor.close()
-            conn.close()
 
 # 새로운 점수 계산 함수 (기존 함수들 대체)
 def calculate_new_peer_score(keyword_data: List[Dict]) -> float:
@@ -261,9 +180,11 @@ class PeerScoreAgent:
     def __init__(self, db_system: PeerEvaluationSystem):
         self.db_system = db_system
     
-    def save_score_to_db(self, user_id: int, year: int, quarter: int, score: float):
-        """점수를 DB에 저장 - MariaDB user_quarter_scores 테이블 업데이트"""
-        self.db_system.update_peer_score_in_db(user_id, year, quarter, score)
+    def save_score_to_db(self, user_id: int, year: int, quarter: int, 
+                        score: float):
+        """점수를 DB에 저장 - 새로운 방식 (5점 만점)"""
+        # 저장 로그도 생략 가능 (필요시 주석 해제)
+        # print(f"[DB 저장] User {user_id}: {score:.2f}/5.0")
         return True
 
 class FeedbackGenerationAgent:
@@ -291,15 +212,15 @@ class FeedbackGenerationAgent:
 """
         )
         
-        # LangChain 버전 호환성 처리 - 경고 억제
+        # LangChain 버전 호환성 처리
         try:
             from langchain.chains import LLMChain
-            self.use_legacy_chain = False  # 경고 방지를 위해 최신 방식 사용
-            self.chain = self.prompt_template | self.db_system.llm | StrOutputParser()
-        except:
-            # fallback to legacy
             self.chain = LLMChain(llm=self.db_system.llm, prompt=self.prompt_template)
             self.use_legacy_chain = True
+        except:
+            # 최신 버전의 경우
+            self.chain = self.prompt_template | self.db_system.llm | StrOutputParser()
+            self.use_legacy_chain = False
     
     def categorize_keywords(self, keyword_data: List[Dict]) -> Tuple[List[str], List[str]]:
         """키워드를 긍정/부정으로 분류"""
@@ -366,8 +287,8 @@ class PeerEvaluationOrchestrator:
         # MongoDB 매니저 추가
         self.mongodb_manager = MongoDBManager()
     
-    def process_peer_evaluation(self, user_id: int, year: int, quarter: int, save_to_mongodb: bool = True) -> Dict:
-        """전체 동료평가 프로세스 실행 - peer_evaluation_results 컬렉션에 저장"""
+    def process_peer_evaluation(self, user_id: int, year: int, quarter: int) -> Dict:
+        """전체 동료평가 프로세스 실행"""
         try:
             # 1. 데이터 조회
             keyword_data = self.db_system.fetch_peer_evaluation_data(user_id, year, quarter)
@@ -376,46 +297,33 @@ class PeerEvaluationOrchestrator:
                 return {
                     "success": False,
                     "message": "해당 기간의 동료평가 데이터가 없습니다.",
-                    "data": None 
+                    "data": None
                 }
             
             # 2. 새로운 방식으로 점수 계산
             final_score = calculate_new_peer_score(keyword_data)
             
-            # 3. 점수 DB 저장 (MariaDB user_quarter_scores 테이블) - 소수점 둘째자리로 반올림
-            rounded_score = round(final_score, 2)
-            self.score_agent.save_score_to_db(user_id, year, quarter, rounded_score)
+            # 3. 점수 DB 저장 (새로운 방식)
+            self.score_agent.save_score_to_db(user_id, year, quarter, final_score)
             
             # 4. 피드백 생성
             feedback = self.feedback_agent.generate_feedback(keyword_data, final_score, quarter)
             
-            # 5. 결과 구성 (5점 만점, 소수점 둘째자리)
-            result_data = {
-                "user_id": user_id,
-                "year": year,
-                "quarter": quarter,
-                "peer_evaluation_score": round(float(final_score), 2),
-                "calculation_method": "new_weighted_method_5point",
-                "feedback": feedback,
-                "keyword_summary": {
-                    "positive": [item['keyword'] for item in keyword_data if item['is_positive']],
-                    "negative": [item['keyword'] for item in keyword_data if not item['is_positive']]
-                },
-                "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            # 6. MongoDB에 사용자 데이터 추가 (새로운 형식)
-            if save_to_mongodb:
-                mongodb_save_success = self.mongodb_manager.add_user_to_quarter_document(result_data)
-                
-                if mongodb_save_success:
-                    print(f"✅ 사용자 ID {user_id} 동료평가 peer_evaluation_results 컬렉션에 추가 완료")
-                else:
-                    print(f"❌ 사용자 ID {user_id} 동료평가 MongoDB 저장 실패")
-            
+            # 5. 결과 반환 (5점 만점, 소수점 둘째자리)
             result = {
                 "success": True,
-                "data": result_data
+                "data": {
+                    "user_id": user_id,
+                    "year": year,
+                    "quarter": quarter,
+                    "peer_evaluation_score": round(float(final_score), 2),
+                    "calculation_method": "new_weighted_method_5point",
+                    "feedback": feedback,
+                    "keyword_summary": {
+                        "positive": [item['keyword'] for item in keyword_data if item['is_positive']],
+                        "negative": [item['keyword'] for item in keyword_data if not item['is_positive']]
+                    }
+                }
             }
             
             return result
@@ -429,30 +337,23 @@ class PeerEvaluationOrchestrator:
             }
     
     def process_batch_peer_evaluation(self, user_ids: List[int], year: int, quarter: int) -> List[Dict]:
-        """여러 사용자의 동료평가를 배치 처리 - peer_evaluation_results 컬렉션에 저장"""
+        """여러 사용자의 동료평가를 배치 처리"""
         results = []
         total_users = len(user_ids)
-        successful_count = 0
-        failed_count = 0
-        scores = []
         
         for i, user_id in enumerate(user_ids, 1):
             # 진행률 표시 (매 10명마다)
             if i % 10 == 0 or i == total_users:
                 print(f"처리 진행률: {i}/{total_users} ({i/total_users*100:.1f}%)")
             
-            # 개별 사용자 처리 (qualitative_evaluation_results 컬렉션에 저장)
-            result = self.process_peer_evaluation(user_id, year, quarter, save_to_mongodb=True)
+            result = self.process_peer_evaluation(user_id, year, quarter)
             results.append(result)
             
-            # 성공/실패 통계 집계
+            # 성공/실패 여부만 간단히 출력
             if result["success"]:
-                successful_count += 1
                 score = result["data"]["peer_evaluation_score"]
-                scores.append(score)
-                print(f"✓ User {user_id}: {score:.2f}/5.0 → peer_evaluation_results 컬렉션에 저장 완료")
+                print(f"✓ User {user_id}: {score:.2f}/5.0")
             else:
-                failed_count += 1
                 print(f"✗ User {user_id}: 데이터 없음")
         
         return results
@@ -475,10 +376,9 @@ class PeerEvaluationOrchestrator:
         return [row[0] for row in results]
 
 def process_single_quarter(orchestrator, user_ids, year, quarter):
-    """단일 분기 처리 함수 - peer_evaluation_results 컬렉션에 저장"""
-    print(f"\n=== {year}년 {quarter}분기 동료평가 처리 시작 ===")
+    """단일 분기 처리 함수 - MongoDB 저장 버전"""
+    print(f"\n=== {year}년 {quarter}분기 처리 시작 ===")
     print(f"처리할 사용자 수: {len(user_ids)}명")
-    print(f"MongoDB 저장 방식: peer_evaluation_results 컬렉션에 type: 'personal-quarter'로 구분")
     print("=" * 50)
     
     # 배치 처리 실행
@@ -488,46 +388,64 @@ def process_single_quarter(orchestrator, user_ids, year, quarter):
         quarter=quarter
     )
     
-    # 결과 통계 계산
+    # 결과 통계 출력
     successful_count = sum(1 for r in results if r["success"])
     failed_count = len(results) - successful_count
     
-    print(f"\n=== {quarter}분기 동료평가 처리 완료 ===")
-    print(f"성공: {successful_count}명 → peer_evaluation_results 컬렉션에 저장 완료")
+    print(f"\n=== {quarter}분기 처리 완료 ===")
+    print(f"성공: {successful_count}명")
     print(f"실패: {failed_count}명")
     
     avg_score = None
-    # 통계 계산
     if successful_count > 0:
         scores = [r["data"]["peer_evaluation_score"] for r in results if r["success"]]
         avg_score = sum(scores) / len(scores)
-        max_score = max(scores)
-        min_score = min(scores)
-        
         print(f"평균 점수: {avg_score:.2f}/5.0")
-        print(f"최고 점수: {max_score:.2f}/5.0")
-        print(f"최저 점수: {min_score:.2f}/5.0")
+        print(f"최고 점수: {max(scores):.2f}/5.0")
+        print(f"최저 점수: {min(scores):.2f}/5.0")
     
-    # 실패한 사용자 개수만 출력
+    # 결과를 구조화된 형태로 변환 (기존과 동일)
+    formatted_results = {
+        "meta": {
+            "evaluation_period": f"{year}Q{quarter}",
+            "total_users_processed": len(results),
+            "successful_evaluations": successful_count,
+            "failed_evaluations": failed_count,
+            "processing_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "version": "v2",
+            "scoring_method": "new_weighted_method_5point"
+        },
+        "statistics": {
+            "average_score": round(avg_score, 2) if avg_score else None,
+            "max_score": round(max(scores), 2) if successful_count > 0 else None,
+            "min_score": round(min(scores), 2) if successful_count > 0 else None
+        },
+        "evaluations": results
+    }
+    
+    # MongoDB에 저장
+    print(f"\n📦 MongoDB에 저장 중...")
+    success = orchestrator.mongodb_manager.save_peer_data(formatted_results)
+    
+    if success:
+        print(f"✅ {year}Q{quarter} 데이터가 MongoDB에 성공적으로 저장되었습니다!")
+    else:
+        print(f"❌ MongoDB 저장 실패. JSON 파일로 백업 저장합니다.")
+        # 백업으로 JSON 파일 저장
+        backup_filename = f"peer_evaluation_results_{year}Q{quarter}_backup.json"
+        with open(backup_filename, 'w', encoding='utf-8') as f:
+            json.dump(formatted_results, f, ensure_ascii=False, indent=2)
+        print(f"백업 파일: {backup_filename}")
+    
+    # 실패한 사용자 목록은 너무 길어질 수 있으므로 개수만 출력
     if failed_count > 0:
         print(f"데이터가 없는 사용자: {failed_count}명")
     
-    return {
-        "quarter": quarter,
-        "successful_count": successful_count,
-        "failed_count": failed_count,
-        "average_score": round(avg_score, 2) if avg_score else 0
-    }
+    return formatted_results
 
 def main():
-    # .env에서 OpenAI API 키 로드
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    if not OPENAI_API_KEY:
-        print("❌ .env 파일에 OPENAI_API_KEY가 설정되지 않았습니다.")
-        return
-    
-    print("✅ .env 파일에서 설정 로드 완료")
-    print(f"🔑 OpenAI API 키: {OPENAI_API_KEY[:10]}{'*' * 20}{OPENAI_API_KEY[-5:]}")
+    # OpenAI API 키 설정
+    OPENAI_API_KEY = "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"
     
     # 오케스트레이터 초기화
     orchestrator = PeerEvaluationOrchestrator(OPENAI_API_KEY)
@@ -544,13 +462,7 @@ def main():
     print(f"\n=== 2024년 전체 분기 동료평가 배치 처리 시작 ===")
     print(f"처리할 사용자 수: {len(user_ids)}명")
     print(f"처리할 분기: Q1, Q2, Q3, Q4")
-    print(f"저장 방식: peer_evaluation_results 컬렉션에 type: 'personal-quarter'로 구분")
-    print(f"저장 위치: MongoDB - {os.getenv('MONGO_DB_NAME')}.peer_evaluation_results")
-    print(f"문서 구조:")
-    print(f"  - type: 'personal-quarter'")
-    print(f"  - evaluated_year: 2024")
-    print(f"  - evaluated_quarter: 1, 2, 3, 4")
-    print(f"  - users: [사용자별 평가 데이터 배열]")
+    print(f"저장 위치: MongoDB - skala.personal_quarter_reports")
     print("=" * 60)
     
     # 전체 결과 저장용
@@ -565,26 +477,20 @@ def main():
         print("\n" + "="*60)
     
     # 전체 분기 통합 결과 출력
-    print(f"\n=== 2024년 전체 분기 동료평가 처리 완료 ===")
+    print(f"\n=== 2024년 전체 분기 처리 완료 ===")
     
-    total_processed = 0
+    total_saved_to_mongodb = 0
     for quarter in [1, 2, 3, 4]:
-        if f"Q{quarter}" in all_quarters_results:
-            quarter_data = all_quarters_results[f"Q{quarter}"]
-            successful = quarter_data["successful_count"]
-            total_processed += successful
-            print(f"Q{quarter}: 성공 {successful}명 → type: 'personal-quarter', evaluated_year: 2024, evaluated_quarter: {quarter}")
-        else:
-            print(f"Q{quarter}: 데이터 없음")
+        quarter_data = all_quarters_results[f"Q{quarter}"]
+        successful = quarter_data["meta"]["successful_evaluations"]
+        print(f"Q{quarter}: 성공 {successful}명 → MongoDB 저장 완료")
+        total_saved_to_mongodb += 1
     
     print(f"\n🎉 처리 완료 요약:")
-    print(f"  - 총 처리된 사용자: {total_processed}명")
-    print(f"  - 저장 방식: peer_evaluation_results 컬렉션에 type별로 구분")
-    print(f"  - 데이터베이스: {os.getenv('MONGO_DB_NAME')}")
-    print(f"  - 컬렉션: peer_evaluation_results")
-    print(f"  - 문서 개수: 4개 (각 분기별)")
-    print(f"  - 문서 구조: type/evaluated_year/evaluated_quarter/user_count/users[]")
-    print(f"  - MariaDB user_quarter_scores.peer_score 업데이트 완료")
+    print(f"  - 총 {total_saved_to_mongodb}개 분기 데이터가 MongoDB에 저장됨")
+    print(f"  - 데이터베이스: skala")
+    print(f"  - 컬렉션: personal_quarter_reports")
+    print(f"  - 구조: peer > 실제데이터")
     
     # MongoDB 연결 종료
     orchestrator.mongodb_manager.close()
