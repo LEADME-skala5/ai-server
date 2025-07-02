@@ -12,10 +12,11 @@ def get_connection():
         host=os.getenv('DB_HOST'),
         user=os.getenv('DB_USER'),
         password=os.getenv('DB_PASSWORD'),
-        db=os.getenv('DB_NAME'),
+        database=os.getenv('DB_DATABASE'),
         port=int(os.getenv('DB_PORT', 3306)),
         charset='utf8mb4',
-        cursorclass=pymysql.cursors.Cursor
+        cursorclass=pymysql.cursors.DictCursor 
+
     )
 
 # Decimal을 float로 안전하게 변환하는 헬퍼 함수
@@ -38,19 +39,20 @@ def get_average_grade(evaluatee_user_id: int, year: int, quarter: int) -> float:
     cursor = conn.cursor()
 
     query = """
-        SELECT AVG(grade)
+        SELECT AVG(grade) as avg_grade
+
         FROM weekly_evaluations
         WHERE evaluatee_user_id = %s
           AND evaluation_year = %s
           AND evaluation_quarter = %s
     """
     cursor.execute(query, (evaluatee_user_id, year, quarter))
-    result = cursor.fetchone()[0]
+    result = cursor.fetchone()
 
     conn.close()
     
-    # Decimal 타입 안전 처리
-    avg_value = safe_float(result)
+    # DictCursor 사용 시 딕셔너리로 접근
+    avg_value = safe_float(result['avg_grade'] if result else 0)
     return round(avg_value, 2)
 
 ### 2. 업무량 점수 (가중 평균 계산)
@@ -74,11 +76,12 @@ def get_weighted_workload_score(evaluatee_user_id: int, year: int, quarter: int)
     if not rows:
         return 0.0
 
-    # Decimal 타입 안전 처리
-    numerator = sum(safe_float(grade) * safe_float(weight) for grade, weight in rows)
-    denominator = sum(safe_float(weight) for _, weight in rows)
+    # DictCursor 사용 시 딕셔너리로 접근
+    numerator = sum(safe_float(row['grade']) * safe_float(row['weight']) for row in rows)
+    denominator = sum(safe_float(row['weight']) for row in rows)
 
     return round(numerator / denominator, 2) if denominator > 0 else 0.0
+
 
 ### 3. 최종 점수 계산
 def calculate_final_score(avg_score: float, workload_score: float) -> float:
