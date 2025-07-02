@@ -7,6 +7,10 @@ import time
 import datetime
 from tqdm import tqdm
 import os
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 # Pinecone 버전 호환성 처리
 try:
@@ -71,7 +75,7 @@ class CSVToPineconeBuilder:
         if not self.pinecone_initialized:
             raise Exception("Pinecone 초기화 실패")
 
-        # 설정값
+        # 설정값 (환경변수 사용)
         self.embedding_model = "text-embedding-3-small"
         self.dimension = 1024
         self.metric = "cosine"
@@ -186,9 +190,10 @@ class CSVToPineconeBuilder:
             
             print(f"📋 기존 인덱스: {existing_indexes}")
             
-            # 새 인덱스명 생성
+            # 환경변수에서 인덱스명 가져오거나 새로 생성
+            base_index_name = os.getenv('PINECONE_INDEX_NAME', 'skore')
             now_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.index_name = f"skore-{now_str}"
+            self.index_name = f"{base_index_name}-{now_str}"
             
             print(f"🔨 새 인덱스 '{self.index_name}' 생성 중...")
             
@@ -441,9 +446,15 @@ class CSVToPineconeBuilder:
             return False, None, None
 
 # 검색 함수
-def search_csv_data(query: str, pinecone_api_key: str, openai_api_key: str, 
-                   index_name: str, namespace: str, top_k: int = 5):
-    """CSV 데이터에서 검색"""
+def search_csv_data(query: str, index_name: str, namespace: str, top_k: int = 5):
+    """CSV 데이터에서 검색 - 환경변수 사용"""
+    pinecone_api_key = os.getenv('PINECONE_API_KEY')
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    
+    if not pinecone_api_key or not openai_api_key:
+        print("❌ 필요한 API 키가 환경변수에 설정되지 않았습니다.")
+        return
+    
     try:
         print(f"🔍 검색: '{query}'")
         
@@ -489,20 +500,45 @@ def search_csv_data(query: str, pinecone_api_key: str, openai_api_key: str,
     except Exception as e:
         print(f"❌ 검색 실패: {e}")
 
+def load_csv_paths_from_env():
+    """환경변수에서 CSV 파일 경로들을 로드"""
+    # CSV 파일 경로를 환경변수에서 가져오거나 기본값 사용
+    output_path = os.getenv('OUTPUT_PATH', './output')
+    
+    # 기본 CSV 파일들
+    default_files = [
+        os.path.join(output_path, "weekly_report_cloud3.csv"),
+        os.path.join(output_path, "weekly_report_esg.csv")
+    ]
+    
+    # 환경변수에서 커스텀 경로가 있는지 확인
+    custom_csv_paths = os.getenv('CSV_FILE_PATHS')
+    if custom_csv_paths:
+        # 콤마로 구분된 경로들을 파싱
+        csv_files = [path.strip() for path in custom_csv_paths.split(',')]
+        return csv_files
+    
+    return default_files
+
 # 실행
 if __name__ == "__main__":
     print("📊 CSV 파일로 Pinecone 벡터 DB 구축")
     print("="*60)
     
-    # API 키 설정
-    PINECONE_API_KEY = "pcsk_5Wcu2A_7QAdTAjfmSYxwxc2sfiZ7G1bhmi9qy6J2KXL1hUfNcoLQ3xGdavA7S4E9DEqpmH"
-    OPENAI_API_KEY = "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"
+    # 환경변수에서 API 키 로드
+    PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     
-    # CSV 파일 경로
-    CSV_FILES = [
-        "D:/Github/ai-server/app/vectorDB/weekly_report_cloud3.csv",
-        "D:/Github/ai-server/app/vectorDB/weekly_report_esg.csv"
-    ]
+    # 필수 환경변수 확인
+    if not PINECONE_API_KEY or not OPENAI_API_KEY:
+        print("❌ 필수 환경변수가 설정되지 않았습니다:")
+        print("   - PINECONE_API_KEY")
+        print("   - OPENAI_API_KEY")
+        print("   .env 파일을 확인하세요.")
+        exit(1)
+    
+    # CSV 파일 경로 로드
+    CSV_FILES = load_csv_paths_from_env()
     
     print(f"📁 처리할 CSV 파일:")
     for file_path in CSV_FILES:
@@ -529,8 +565,6 @@ if __name__ == "__main__":
             print(f"\n{'='*20} '{query}' 검색 {'='*20}")
             search_csv_data(
                 query, 
-                PINECONE_API_KEY, 
-                OPENAI_API_KEY,
                 index_name,
                 namespace,
                 top_k=3

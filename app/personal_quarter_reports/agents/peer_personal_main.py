@@ -1,9 +1,14 @@
 import mysql.connector
 import json
 from decimal import Decimal
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import logging
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 # MongoDB 추가 import
 from pymongo import MongoClient
@@ -23,13 +28,31 @@ except ImportError:
     from langchain_core.output_parsers import StrOutputParser
 
 class MongoDBManager:
-    """MongoDB 연결 및 관리 클래스"""
+    """MongoDB 연결 및 관리 클래스 - 환경변수 버전"""
     
     def __init__(self):
-        self.mongodb_uri = "mongodb://root:root@13.209.110.151:27017/"
-        self.database_name = "skala"
+        # 환경변수에서 MongoDB 설정 로드
+        mongo_host = os.getenv('MONGO_HOST', 'localhost')
+        mongo_port = int(os.getenv('MONGO_PORT', 27017))
+        mongo_user = os.getenv('MONGO_USER')
+        mongo_password = os.getenv('MONGO_PASSWORD')
+        self.database_name = os.getenv('MONGO_DB_NAME', 'skala')
         self.collection_name = "personal_quarter_reports"
+        
+        # MongoDB 연결 URI 구성
+        if mongo_user and mongo_password:
+            self.mongodb_uri = f"mongodb://{mongo_user}:{mongo_password}@{mongo_host}:{mongo_port}/"
+        else:
+            self.mongodb_uri = f"mongodb://{mongo_host}:{mongo_port}/"
+        
         self.client = None
+        
+        # 환경변수 검증
+        if not mongo_host:
+            raise ValueError(
+                "MONGO_HOST 환경변수가 설정되지 않았습니다. "
+                ".env 파일을 확인하세요."
+            )
     
     def connect(self):
         """MongoDB 연결"""
@@ -59,7 +82,8 @@ class MongoDBManager:
                 "created_at": datetime.now(),
                 "updated_at": datetime.now(),
                 "data_type": "peer_evaluation_results",
-                "quarter": quarter_data.get("meta", {}).get("evaluation_period", "unknown")
+                "quarter": quarter_data.get("meta", {}).get("evaluation_period", "unknown"),
+                "config_source": "환경변수"
             }
             
             result = collection.insert_one(peer_document)
@@ -80,15 +104,45 @@ class MongoDBManager:
             print("MongoDB 연결 종료")
 
 class PeerEvaluationSystem:
-    def __init__(self, openai_api_key: str):
+    def __init__(self, openai_api_key: Optional[str] = None):
+        # 환경변수에서 설정 로드
+        self.openai_api_key = openai_api_key or os.getenv('OPENAI_API_KEY')
+        
+        # 필수 환경변수 검증
+        if not self.openai_api_key:
+            raise ValueError(
+                "OpenAI API 키가 설정되지 않았습니다. "
+                "OPENAI_API_KEY 환경변수를 확인하세요."
+            )
+        
+        # DB 설정 - 환경변수에서 로드
         self.db_config = {
-            'host': '13.209.110.151',
-            'port': 3306,
-            'user': 'root',
-            'password': 'root',
-            'database': 'skala'
+            'host': os.getenv('DB_HOST', 'localhost'),
+            'port': int(os.getenv('DB_PORT', 3306)),
+            'user': os.getenv('DB_USER'),
+            'password': os.getenv('DB_PASSWORD'),
+            'database': os.getenv('DB_NAME', 'skala')
         }
-        self.llm = OpenAI(api_key=openai_api_key, temperature=0.7,max_tokens=1500)
+        
+        # DB 필수 환경변수 검증
+        required_db_vars = ['host', 'user', 'password', 'database']
+        missing_db_vars = [var for var in required_db_vars if not self.db_config.get(var)]
+        
+        if missing_db_vars:
+            raise ValueError(
+                f"DB 필수 환경변수가 설정되지 않았습니다: {', '.join([f'DB_{var.upper()}' for var in missing_db_vars])}\n"
+                f".env 파일을 확인하세요."
+            )
+        
+        # LLM 초기화
+        self.llm = OpenAI(
+            api_key=self.openai_api_key, 
+            temperature=0.7,
+            max_tokens=1500,
+            model=os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo-instruct')
+        )
+        
+        print("✅ 모든 환경변수가 정상적으로 로드되었습니다.")
         
     def get_db_connection(self):
         """DB 연결"""
@@ -278,9 +332,9 @@ def convert_decimal_to_float(obj):
     return obj
 
 class PeerEvaluationOrchestrator:
-    """전체 동료평가 프로세스 오케스트레이터"""
+    """전체 동료평가 프로세스 오케스트레이터 - 환경변수 버전"""
     
-    def __init__(self, openai_api_key: str):
+    def __init__(self, openai_api_key: Optional[str] = None):
         self.db_system = PeerEvaluationSystem(openai_api_key)
         self.score_agent = PeerScoreAgent(self.db_system)
         self.feedback_agent = FeedbackGenerationAgent(self.db_system)
@@ -413,7 +467,8 @@ def process_single_quarter(orchestrator, user_ids, year, quarter):
             "failed_evaluations": failed_count,
             "processing_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "version": "v2",
-            "scoring_method": "new_weighted_method_5point"
+            "scoring_method": "new_weighted_method_5point",
+            "config_source": "환경변수"
         },
         "statistics": {
             "average_score": round(avg_score, 2) if avg_score else None,
@@ -432,7 +487,9 @@ def process_single_quarter(orchestrator, user_ids, year, quarter):
     else:
         print(f"❌ MongoDB 저장 실패. JSON 파일로 백업 저장합니다.")
         # 백업으로 JSON 파일 저장
-        backup_filename = f"peer_evaluation_results_{year}Q{quarter}_backup.json"
+        output_path = os.getenv('OUTPUT_PATH', './output')
+        os.makedirs(output_path, exist_ok=True)
+        backup_filename = os.path.join(output_path, f"peer_evaluation_results_{year}Q{quarter}_backup.json")
         with open(backup_filename, 'w', encoding='utf-8') as f:
             json.dump(formatted_results, f, ensure_ascii=False, indent=2)
         print(f"백업 파일: {backup_filename}")
@@ -444,58 +501,202 @@ def process_single_quarter(orchestrator, user_ids, year, quarter):
     return formatted_results
 
 def main():
-    # OpenAI API 키 설정
-    OPENAI_API_KEY = "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"
+    """메인 실행 함수"""
     
-    # 오케스트레이터 초기화
-    orchestrator = PeerEvaluationOrchestrator(OPENAI_API_KEY)
+    print("🎯 === 동료평가 시스템 ===")
+    print("📊 환경변수 기반 AI 평가 시스템")
     
-    # MongoDB 연결 테스트
-    print("🔌 MongoDB 연결 테스트...")
-    if not orchestrator.mongodb_manager.connect():
-        print("❌ MongoDB 연결 실패. 프로그램을 종료합니다.")
-        return
-    
-    # 1~100 사용자 ID 리스트 생성
-    user_ids = list(range(1, 101))
-    
-    print(f"\n=== 2024년 전체 분기 동료평가 배치 처리 시작 ===")
-    print(f"처리할 사용자 수: {len(user_ids)}명")
-    print(f"처리할 분기: Q1, Q2, Q3, Q4")
-    print(f"저장 위치: MongoDB - skala.personal_quarter_reports")
-    print("=" * 60)
-    
-    # 전체 결과 저장용
-    all_quarters_results = {}
-    
-    # 4개 분기 모두 처리
-    for quarter in [1, 2, 3, 4]:
-        quarter_result = process_single_quarter(orchestrator, user_ids, 2024, quarter)
-        all_quarters_results[f"Q{quarter}"] = quarter_result
+    try:
+        print(f"\n🤖 시스템 초기화 중...")
+        print("📋 환경변수 검증 중...")
         
-        # 분기 간 구분을 위한 여백
-        print("\n" + "="*60)
+        # 오케스트레이터 초기화 (환경변수 자동 로드)
+        orchestrator = PeerEvaluationOrchestrator()
+        
+        print("✅ 시스템 초기화 완료!")
+        
+        # MongoDB 연결 테스트
+        print("🔌 MongoDB 연결 테스트...")
+        if not orchestrator.mongodb_manager.connect():
+            print("❌ MongoDB 연결 실패. 프로그램을 종료합니다.")
+            return
+        
+        # 사용자 메뉴
+        while True:
+            print(f"\n🎯 === 메인 메뉴 ===")
+            print("1. 단일 사용자 평가")
+            print("2. 전체 사용자 배치 평가 (1-100)")
+            print("3. 사용자 정의 범위 배치 평가")
+            print("4. 특정 분기 사용자 조회")
+            print("5. 종료")
+            
+            choice = input("\n선택하세요 (1-5): ").strip()
+            
+            if choice == "1":
+                try:
+                    user_id = int(input("사용자 ID를 입력하세요: ").strip())
+                    year = int(input("평가 연도를 입력하세요 (기본: 2024): ").strip() or "2024")
+                    quarter = int(input("분기를 입력하세요 (1-4): ").strip())
+                    
+                    if quarter not in [1, 2, 3, 4]:
+                        print("❌ 분기는 1-4 사이의 값이어야 합니다.")
+                        continue
+                    
+                    print(f"\n🚀 사용자 {user_id}의 {year}년 {quarter}분기 평가 시작...")
+                    result = orchestrator.process_peer_evaluation(user_id, year, quarter)
+                    
+                    if result["success"]:
+                        data = result["data"]
+                        print(f"\n🎉 === 평가 완료 ===")
+                        print(f"📊 점수: {data['peer_evaluation_score']}/5.0")
+                        print(f"✅ 긍정 키워드: {', '.join(data['keyword_summary']['positive'])}")
+                        print(f"⚠️ 부정 키워드: {', '.join(data['keyword_summary']['negative'])}")
+                        print(f"💬 피드백: {data['feedback'][:100]}...")
+                    else:
+                        print(f"❌ 평가 실패: {result['message']}")
+                        
+                except ValueError:
+                    print("❌ 올바른 숫자를 입력해주세요.")
+                except Exception as e:
+                    print(f"❌ 평가 중 오류 발생: {e}")
+            
+            elif choice == "2":
+                year = int(input("평가 연도를 입력하세요 (기본: 2024): ").strip() or "2024")
+                
+                print(f"\n📊 {year}년 전체 분기 동료평가 배치 처리를 시작합니다.")
+                print(f"처리할 사용자: 1-100 (100명)")
+                print(f"처리할 분기: Q1, Q2, Q3, Q4")
+                print(f"저장 위치: MongoDB")
+                print("⚠️ 이 작업은 시간이 오래 걸릴 수 있습니다.")
+                
+                confirm = input("계속하시겠습니까? (y/N): ").strip().lower()
+                
+                if confirm not in ['y', 'yes']:
+                    print("❌ 배치 평가를 취소합니다.")
+                    continue
+                
+                # 1~100 사용자 ID 리스트 생성
+                user_ids = list(range(1, 101))
+                
+                print("=" * 60)
+                
+                # 전체 결과 저장용
+                all_quarters_results = {}
+                
+                # 4개 분기 모두 처리
+                for quarter in [1, 2, 3, 4]:
+                    quarter_result = process_single_quarter(orchestrator, user_ids, year, quarter)
+                    all_quarters_results[f"Q{quarter}"] = quarter_result
+                    
+                    # 분기 간 구분을 위한 여백
+                    print("\n" + "="*60)
+                
+                # 전체 분기 통합 결과 출력
+                print(f"\n=== {year}년 전체 분기 처리 완료 ===")
+                
+                total_saved_to_mongodb = 0
+                for quarter in [1, 2, 3, 4]:
+                    quarter_data = all_quarters_results[f"Q{quarter}"]
+                    successful = quarter_data["meta"]["successful_evaluations"]
+                    print(f"Q{quarter}: 성공 {successful}명 → MongoDB 저장 완료")
+                    total_saved_to_mongodb += 1
+                
+                print(f"\n🎉 처리 완료 요약:")
+                print(f"  - 총 {total_saved_to_mongodb}개 분기 데이터가 MongoDB에 저장됨")
+                print(f"  - 데이터베이스: {orchestrator.mongodb_manager.database_name}")
+                print(f"  - 컬렉션: {orchestrator.mongodb_manager.collection_name}")
+                print(f"  - 구조: peer > 실제데이터")
+            
+            elif choice == "3":
+                try:
+                    start_id = int(input("시작 사용자 ID: ").strip())
+                    end_id = int(input("끝 사용자 ID: ").strip())
+                    year = int(input("평가 연도 (기본: 2024): ").strip() or "2024")
+                    quarter = int(input("분기 (1-4): ").strip())
+                    
+                    if quarter not in [1, 2, 3, 4]:
+                        print("❌ 분기는 1-4 사이의 값이어야 합니다.")
+                        continue
+                    
+                    if start_id > end_id:
+                        print("❌ 시작 ID가 끝 ID보다 클 수 없습니다.")
+                        continue
+                    
+                    user_ids = list(range(start_id, end_id + 1))
+                    
+                    print(f"\n📊 사용자 {start_id}-{end_id} ({len(user_ids)}명)의 {year}년 {quarter}분기 평가")
+                    confirm = input("계속하시겠습니까? (y/N): ").strip().lower()
+                    
+                    if confirm not in ['y', 'yes']:
+                        print("❌ 배치 평가를 취소합니다.")
+                        continue
+                    
+                    quarter_result = process_single_quarter(orchestrator, user_ids, year, quarter)
+                    
+                    print(f"\n🎉 처리 완료:")
+                    print(f"  - 성공: {quarter_result['meta']['successful_evaluations']}명")
+                    print(f"  - 실패: {quarter_result['meta']['failed_evaluations']}명")
+                    if quarter_result['statistics']['average_score']:
+                        print(f"  - 평균 점수: {quarter_result['statistics']['average_score']}/5.0")
+                    
+                except ValueError:
+                    print("❌ 올바른 숫자를 입력해주세요.")
+                except Exception as e:
+                    print(f"❌ 처리 중 오류 발생: {e}")
+            
+            elif choice == "4":
+                try:
+                    year = int(input("조회할 연도 (기본: 2024): ").strip() or "2024")
+                    quarter = int(input("조회할 분기 (1-4): ").strip())
+                    
+                    if quarter not in [1, 2, 3, 4]:
+                        print("❌ 분기는 1-4 사이의 값이어야 합니다.")
+                        continue
+                    
+                    print(f"\n🔍 {year}년 {quarter}분기 데이터가 있는 사용자 조회 중...")
+                    user_ids = orchestrator.get_all_users_with_data(year, quarter)
+                    
+                    if user_ids:
+                        print(f"📋 총 {len(user_ids)}명의 사용자:")
+                        # 10명씩 출력
+                        for i in range(0, len(user_ids), 10):
+                            batch = user_ids[i:i+10]
+                            print(f"  {', '.join(map(str, batch))}")
+                    else:
+                        print("❌ 해당 기간에 데이터가 있는 사용자가 없습니다.")
+                        
+                except ValueError:
+                    print("❌ 올바른 숫자를 입력해주세요.")
+                except Exception as e:
+                    print(f"❌ 조회 중 오류 발생: {e}")
+            
+            elif choice == "5":
+                print("👋 시스템을 종료합니다.")
+                # MongoDB 연결 종료
+                orchestrator.mongodb_manager.close()
+                break
+            
+            else:
+                print("❌ 잘못된 선택입니다. 1-5 중에서 선택해주세요.")
     
-    # 전체 분기 통합 결과 출력
-    print(f"\n=== 2024년 전체 분기 처리 완료 ===")
-    
-    total_saved_to_mongodb = 0
-    for quarter in [1, 2, 3, 4]:
-        quarter_data = all_quarters_results[f"Q{quarter}"]
-        successful = quarter_data["meta"]["successful_evaluations"]
-        print(f"Q{quarter}: 성공 {successful}명 → MongoDB 저장 완료")
-        total_saved_to_mongodb += 1
-    
-    print(f"\n🎉 처리 완료 요약:")
-    print(f"  - 총 {total_saved_to_mongodb}개 분기 데이터가 MongoDB에 저장됨")
-    print(f"  - 데이터베이스: skala")
-    print(f"  - 컬렉션: personal_quarter_reports")
-    print(f"  - 구조: peer > 실제데이터")
-    
-    # MongoDB 연결 종료
-    orchestrator.mongodb_manager.close()
-    
-    return all_quarters_results
+    except ValueError as e:
+        # 환경변수 관련 오류
+        print(f"❌ 설정 오류: {e}")
+        print("\n💡 해결 방법:")
+        print("1. .env 파일이 존재하는지 확인")
+        print("2. 필수 환경변수들이 올바르게 설정되었는지 확인")
+        print("   - OPENAI_API_KEY")
+        print("   - MONGO_HOST, MONGO_DB_NAME")
+        print("   - DB_HOST, DB_USER, DB_PASSWORD, DB_NAME")
+        print("3. API 키들이 유효한지 확인")
+        print("4. 데이터베이스 연결 정보가 정확한지 확인")
+        
+    except Exception as e:
+        print(f"❌ 시스템 오류: {e}")
+        import traceback
+        print("\n📋 에러 상세:")
+        traceback.print_exc()
+
 
 if __name__ == "__main__":
     main()

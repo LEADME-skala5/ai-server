@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-주간 보고서 분기별 배치 평가 시스템 - 최종 수정 버전
+주간 보고서 분기별 배치 평가 시스템 - 환경변수 버전
 실행: python main.py
 """
 
@@ -16,6 +16,10 @@ import logging
 import pymysql
 from pinecone import Pinecone, ServerlessSpec
 import random
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 # 로깅 설정
 logging.basicConfig(
@@ -28,23 +32,50 @@ logger = logging.getLogger(__name__)
 # 설정 클래스
 class Config:
     def __init__(self):
-        self.OPENAI_API_KEY = "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"
-        self.PINECONE_API_KEY = "pcsk_5Wcu2A_7QAdTAjfmSYxwxc2sfiZ7G1bhmi9qy6J2KXL1hUfNcoLQ3xGdavA7S4E9DEqpmH"
-        self.MODEL = "gpt-4-turbo"
-        self.OUTPUT_PATH = "./output"
+        # 환경변수에서 API 키 로드
+        self.OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+        self.PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+        
+        # 모델 및 기본 설정
+        self.MODEL = os.getenv('OPENAI_MODEL', 'gpt-4-turbo')
+        self.OUTPUT_PATH = os.getenv('OUTPUT_PATH', './output')
         
         # Pinecone 설정
-        self.PINECONE_INDEX_NAME = "skore-20250624-144422"
+        self.PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'skore')
         
-        # MariaDB 설정
+        # MariaDB 설정 - 환경변수에서 로드
         self.DB_CONFIG = {
-            'host': '13.209.110.151',
-            'port': 3306,
-            'user': 'root',
-            'password': 'root',
-            'database': 'skala',
-            'charset': 'utf8mb4'
+            'host': os.getenv('DB_HOST'),
+            'port': int(os.getenv('DB_PORT', 3306)),
+            'user': os.getenv('DB_USER'),
+            'password': os.getenv('DB_PASSWORD'),
+            'database': os.getenv('DB_NAME'),
+            'charset': os.getenv('DB_CHARSET', 'utf8mb4')
         }
+        
+        # 필수 환경변수 검증
+        self._validate_config()
+    
+    def _validate_config(self):
+        """필수 환경변수 검증"""
+        required_vars = {
+            'OPENAI_API_KEY': self.OPENAI_API_KEY,
+            'PINECONE_API_KEY': self.PINECONE_API_KEY,
+            'DB_HOST': self.DB_CONFIG['host'],
+            'DB_USER': self.DB_CONFIG['user'],
+            'DB_PASSWORD': self.DB_CONFIG['password'],
+            'DB_NAME': self.DB_CONFIG['database']
+        }
+        
+        missing_vars = [var for var, value in required_vars.items() if not value]
+        
+        if missing_vars:
+            raise ValueError(
+                f"필수 환경변수가 설정되지 않았습니다: {', '.join(missing_vars)}\n"
+                f".env 파일을 확인하세요."
+            )
+        
+        logger.info("✅ 모든 필수 환경변수가 정상적으로 로드되었습니다.")
 
 # =====================================
 # 데이터베이스 관리자
@@ -858,6 +889,9 @@ def main():
     
     try:
         print("\n🤖 시스템 초기화 중...")
+        print("📋 환경변수 검증 중...")
+        
+        # Config 초기화 시 환경변수 검증이 자동으로 이루어짐
         evaluator = WeeklyReportEvaluator()
         print("✅ 시스템 초기화 완료!")
         
@@ -951,7 +985,7 @@ def main():
                         for detail in successful_details:
                             print(f"   - {detail}")
                     
-                    print(f"\n📁 결과 파일이 './output' 폴더에 저장되었습니다.")
+                    print(f"\n📁 결과 파일이 '{evaluator.config.OUTPUT_PATH}' 폴더에 저장되었습니다.")
                     print(f"💡 파일명 형식: evaluation_{{사용자ID}}_{{년도}}Q{{분기}}_{{타임스탬프}}.json")
                     print(f"📄 예시: evaluation_100_2024Q1_20250625_153054.json")
                     
@@ -964,6 +998,14 @@ def main():
             
             else:
                 print("❌ 잘못된 선택입니다. 1-2 중에서 선택해주세요.")
+        
+    except ValueError as e:
+        # 환경변수 관련 오류
+        print(f"❌ 설정 오류: {e}")
+        print("\n💡 해결 방법:")
+        print("1. .env 파일이 존재하는지 확인")
+        print("2. 필수 환경변수들이 올바르게 설정되었는지 확인")
+        print("3. API 키들이 유효한지 확인")
         
     except KeyboardInterrupt:
         print("\n\n👋 사용자가 중단했습니다.")

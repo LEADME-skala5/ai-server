@@ -6,12 +6,19 @@ import json
 from typing import List, Dict, Any
 import time
 from tqdm import tqdm
+import os
+from dotenv import load_dotenv
+
+# .env 파일 로드
+load_dotenv()
 
 class RDBToPineconeBuilder:
     def __init__(self, 
                  pinecone_api_key: str,
                  openai_api_key: str,
-                 db_config: Dict[str, Any]):
+                 db_config: Dict[str, Any],
+                 index_name: str = None,
+                 namespace: str = "personal_weekly"):
         """
         RDB 데이터를 Pinecone 벡터 DB로 구축하는 클래스
         
@@ -19,6 +26,8 @@ class RDBToPineconeBuilder:
             pinecone_api_key: Pinecone API 키
             openai_api_key: OpenAI API 키
             db_config: 데이터베이스 연결 설정
+            index_name: Pinecone 인덱스 이름
+            namespace: Pinecone 네임스페이스
         """
         self.pinecone_api_key = pinecone_api_key
         self.openai_api_key = openai_api_key
@@ -55,11 +64,11 @@ class RDBToPineconeBuilder:
         if not self.pinecone_initialized:
             raise Exception("❌ Pinecone 초기화 실패. API 키 또는 환경 설정을 확인하세요.")
         
-        # 설정값 (무료 플랜 고려)
-        self.embedding_model = "text-embedding-3-small"
-        self.dimension = 1536  # text-embedding-3-small 기본 차원 (1024가 아닌 1536)
-        self.index_name = "skore"
-        self.namespace = "personal_weekly"
+        # 설정값 (환경변수에서 가져오거나 기본값 사용)
+        self.embedding_model = os.getenv('OPENAI_MODEL', 'gpt-4-turbo')  # 임베딩 모델은 별도 설정 필요
+        self.dimension = 1536  # text-embedding-3-small 기본 차원
+        self.index_name = index_name or os.getenv('PINECONE_INDEX_NAME', 'skore')
+        self.namespace = namespace
         
     def connect_to_db(self):
         """MariaDB 연결"""
@@ -70,7 +79,7 @@ class RDBToPineconeBuilder:
                 user=self.db_config['username'],
                 password=self.db_config['password'],
                 database=self.db_config['database'],
-                charset='utf8mb4',
+                charset=self.db_config.get('charset', 'utf8mb4'),
                 cursorclass=pymysql.cursors.DictCursor
             )
             print("✅ 데이터베이스 연결 성공")
@@ -132,7 +141,7 @@ class RDBToPineconeBuilder:
         """OpenAI API를 사용해 텍스트 임베딩 생성"""
         try:
             response = self.openai_client.embeddings.create(
-                model=self.embedding_model,
+                model="text-embedding-3-small",  # 임베딩 전용 모델 사용
                 input=text
                 # dimensions 파라미터 제거 (기본 1536 차원 사용)
             )
@@ -277,20 +286,27 @@ class RDBToPineconeBuilder:
             print("🔌 데이터베이스 연결 종료")
 
 # 검색 예시 함수
-def search_vectors(query: str, pinecone_api_key: str, openai_api_key: str, top_k: int = 5):
-    """벡터 검색 예시"""
+def search_vectors(query: str, top_k: int = 5):
+    """벡터 검색 예시 - 환경변수 사용"""
+    pinecone_api_key = os.getenv('PINECONE_API_KEY')
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    index_name = os.getenv('PINECONE_INDEX_NAME', 'skore')
+    
+    if not pinecone_api_key or not openai_api_key:
+        print("❌ 필요한 API 키가 환경변수에 설정되지 않았습니다.")
+        return
+    
     # OpenAI로 쿼리 임베딩
     client = OpenAI(api_key=openai_api_key)
     response = client.embeddings.create(
         model="text-embedding-3-small",
-        input=query,
-        dimensions=1024
+        input=query
     )
     query_embedding = response.data[0].embedding
     
     # Pinecone 검색 (구버전 방식)
     pinecone.init(api_key=pinecone_api_key)
-    index = pinecone.Index("skore")
+    index = pinecone.Index(index_name)
     
     results = index.query(
         vector=query_embedding,
@@ -305,8 +321,16 @@ def search_vectors(query: str, pinecone_api_key: str, openai_api_key: str, top_k
         print(f"   ID: {match.id}")
         print(f"   텍스트: {match.metadata.get('text', 'N/A')[:200]}...")
 
-def init_resources(pinecone_api_key: str, openai_api_key: str, index_name: str):
-    """필요한 리소스 초기화"""
+def init_resources(index_name: str = None):
+    """필요한 리소스 초기화 - 환경변수 사용"""
+    pinecone_api_key = os.getenv('PINECONE_API_KEY')
+    openai_api_key = os.getenv('OPENAI_API_KEY')
+    index_name = index_name or os.getenv('PINECONE_INDEX_NAME', 'skore')
+    
+    if not pinecone_api_key or not openai_api_key:
+        print("❌ 필요한 API 키가 환경변수에 설정되지 않았습니다.")
+        return None, None
+    
     # OpenAI 설정
     openai_client = OpenAI(api_key=openai_api_key)
     
@@ -318,19 +342,44 @@ def init_resources(pinecone_api_key: str, openai_api_key: str, index_name: str):
     
     return openai_client, pinecone_index
 
+def load_db_config_from_env():
+    """환경변수에서 DB 설정을 로드"""
+    return {
+        'host': os.getenv('DB_HOST'),
+        'port': int(os.getenv('DB_PORT', 3306)),
+        'username': os.getenv('DB_USER'),
+        'password': os.getenv('DB_PASSWORD'),
+        'database': os.getenv('DB_NAME'),
+        'charset': os.getenv('DB_CHARSET', 'utf8mb4')
+    }
+
 # 사용 예시
 if __name__ == "__main__":
-    # 설정값 (보안상 실제 운영에서는 환경변수 사용 권장)
-    PINECONE_API_KEY = "pcsk_79HynK_8MFWKGTDNiaopX94jbQxLi5E1dpB546X6idHGtMHQifHYyguSJG5AxNECTQeLFW"
-    OPENAI_API_KEY = "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"
+    # 환경변수에서 설정값 로드
+    PINECONE_API_KEY = os.getenv('PINECONE_API_KEY')
+    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
     
-    DB_CONFIG = {
-        'host': '13.209.110.151',
-        'port': 3306,
-        'username': 'root',
-        'password': 'root',
-        'database': 'skala'
-    }
+    # 필수 환경변수 확인
+    if not PINECONE_API_KEY or not OPENAI_API_KEY:
+        print("❌ 필수 환경변수가 설정되지 않았습니다:")
+        print("   - PINECONE_API_KEY")
+        print("   - OPENAI_API_KEY")
+        print("   .env 파일을 확인하세요.")
+        exit(1)
+    
+    # DB 설정 로드
+    DB_CONFIG = load_db_config_from_env()
+    
+    # DB 설정 유효성 검사
+    required_db_fields = ['host', 'username', 'password', 'database']
+    missing_fields = [field for field in required_db_fields if not DB_CONFIG.get(field)]
+    
+    if missing_fields:
+        print(f"❌ 누락된 DB 설정: {', '.join(missing_fields)}")
+        print("   .env 파일의 DB 관련 환경변수를 확인하세요.")
+        exit(1)
+    
+    print("✅ 모든 환경변수가 정상적으로 로드되었습니다.")
     
     # 벡터 DB 구축 실행
     builder = RDBToPineconeBuilder(

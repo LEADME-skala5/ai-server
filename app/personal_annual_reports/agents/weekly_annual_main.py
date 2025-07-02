@@ -9,13 +9,10 @@ import logging
 from pymongo import MongoClient
 import random
 import pymysql
+from dotenv import load_dotenv
 
-# .env 파일 지원 (선택사항)
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # python-dotenv가 설치되지 않은 경우 무시
+# .env 파일 로드
+load_dotenv()
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -24,45 +21,53 @@ logger = logging.getLogger(__name__)
 class MongoDBWeeklyReportAgent:
     def __init__(self, 
                  openai_api_key: Optional[str] = None,
-                 model: str = "gpt-4-turbo",
-                 output_path: str = "./output"):
+                 model: Optional[str] = None,
+                 output_path: Optional[str] = None):
         """
-        MongoDB 기반 주간 보고서 평가 에이전트
+        MongoDB 기반 주간 보고서 평가 에이전트 - 환경변수 버전
         weekly_evaluation_results 컬렉션에서 데이터를 로드하여 AI 평가 수행
         
         Args:
-            openai_api_key: OpenAI API 키
-            model: 사용할 LLM 모델명
-            output_path: 결과 파일들을 저장할 경로
+            openai_api_key: OpenAI API 키 (None인 경우 환경변수에서 로드)
+            model: 사용할 LLM 모델명 (None인 경우 환경변수에서 로드)
+            output_path: 결과 파일들을 저장할 경로 (None인 경우 환경변수에서 로드)
         """
-        # OpenAI API 키 설정
-        final_openai_key = openai_api_key or os.getenv("OPENAI_API_KEY")
-        if not final_openai_key:
-            raise ValueError("OpenAI API 키가 설정되지 않았습니다.")
+        # 환경변수에서 설정 로드
+        self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+        self.model = model or os.getenv("OPENAI_MODEL", "gpt-4-turbo")
+        self.output_path = Path(output_path or os.getenv("OUTPUT_PATH", "./output"))
         
-        self.openai_client = openai.OpenAI(api_key=final_openai_key)
-        self.model = model
-        self.output_path = Path(output_path)
+        # 필수 환경변수 검증
+        if not self.openai_api_key:
+            raise ValueError(
+                "OpenAI API 키가 설정되지 않았습니다. "
+                "OPENAI_API_KEY 환경변수를 확인하세요."
+            )
         
-        # MongoDB 연결 정보
+        self.openai_client = openai.OpenAI(api_key=self.openai_api_key)
+        
+        # MongoDB 연결 정보 - 환경변수에서 로드
         self.mongodb_config = {
-            'host': '13.209.110.151',  # 공용 MongoDB 호스트
-            'port': 27017,        # MongoDB 포트
-            'database': 'skala',  # 데이터베이스 이름
-            'collection': 'weekly_evaluation_results',  # 주간 평가 결과 컬렉션
-            'username': 'root',   # MongoDB 사용자명
-            'password': 'root'    # MongoDB 비밀번호
+            'host': os.getenv('MONGO_HOST', 'localhost'),
+            'port': int(os.getenv('MONGO_PORT', 27017)),
+            'database': os.getenv('MONGO_DB_NAME', 'skala'),
+            'collection': 'weekly_evaluation_results',
+            'username': os.getenv('MONGO_USER'),
+            'password': os.getenv('MONGO_PASSWORD')
         }
         
-        # MariaDB 연결 정보 추가
+        # MariaDB 연결 정보 - 환경변수에서 로드
         self.mariadb_config = {
-            'host': '13.209.110.151',  # MariaDB 호스트 (MongoDB와 동일하다고 가정)
-            'port': 3306,             # MariaDB 기본 포트
-            'database': 'skala',      # 데이터베이스 이름
-            'username': 'root',       # MariaDB 사용자명
-            'password': 'root',       # MariaDB 비밀번호
-            'charset': 'utf8mb4'      # 한글 지원을 위한 charset
+            'host': os.getenv('DB_HOST', 'localhost'),
+            'port': int(os.getenv('DB_PORT', 3306)),
+            'database': os.getenv('DB_NAME', 'skala'),
+            'username': os.getenv('DB_USER'),
+            'password': os.getenv('DB_PASSWORD'),
+            'charset': os.getenv('DB_CHARSET', 'utf8mb4')
         }
+        
+        # 필수 환경변수 검증
+        self._validate_config()
         
         # MongoDB 클라이언트 초기화
         self.mongo_client = None
@@ -82,7 +87,29 @@ class MongoDBWeeklyReportAgent:
         # 출력 디렉토리 생성
         self.output_path.mkdir(exist_ok=True)
         
-        logger.info(f"MongoDBWeeklyReportAgent 초기화 완료 - 모델: {model}")
+        logger.info(f"MongoDBWeeklyReportAgent 초기화 완료 - 모델: {self.model}")
+    
+    def _validate_config(self):
+        """필수 환경변수 검증"""
+        required_vars = {
+            'OPENAI_API_KEY': self.openai_api_key,
+            'MONGO_HOST': self.mongodb_config['host'],
+            'MONGO_DB_NAME': self.mongodb_config['database'],
+            'DB_HOST': self.mariadb_config['host'],
+            'DB_USER': self.mariadb_config['username'],
+            'DB_PASSWORD': self.mariadb_config['password'],
+            'DB_NAME': self.mariadb_config['database']
+        }
+        
+        missing_vars = [var for var, value in required_vars.items() if not value]
+        
+        if missing_vars:
+            raise ValueError(
+                f"필수 환경변수가 설정되지 않았습니다: {', '.join(missing_vars)}\n"
+                f".env 파일을 확인하세요."
+            )
+        
+        logger.info("✅ 모든 필수 환경변수가 정상적으로 로드되었습니다.")
     
     def connect_to_mariadb(self):
         """MariaDB에 연결합니다."""
@@ -139,8 +166,11 @@ class MongoDBWeeklyReportAgent:
     def connect_to_mongodb(self):
         """MongoDB에 연결합니다."""
         try:
-            # 성공한 연결 방법 사용: authSource=admin
-            connection_string = f"mongodb://{self.mongodb_config['username']}:{self.mongodb_config['password']}@{self.mongodb_config['host']}:{self.mongodb_config['port']}/{self.mongodb_config['database']}?authSource=admin"
+            # 인증 정보가 있는 경우와 없는 경우 처리
+            if self.mongodb_config.get('username') and self.mongodb_config.get('password'):
+                connection_string = f"mongodb://{self.mongodb_config['username']}:{self.mongodb_config['password']}@{self.mongodb_config['host']}:{self.mongodb_config['port']}/{self.mongodb_config['database']}?authSource=admin"
+            else:
+                connection_string = f"mongodb://{self.mongodb_config['host']}:{self.mongodb_config['port']}/"
             
             print(f"🔗 MongoDB 연결 시도: {self.mongodb_config['host']}:{self.mongodb_config['port']}")
             
@@ -640,21 +670,6 @@ class MongoDBWeeklyReportAgent:
         
         return sorted(timeline, key=lambda x: x['date'])
     
-    def _categorize_activity(self, activity: str) -> str:
-        """활동을 카테고리로 분류합니다."""
-        activity_lower = activity.lower()
-        
-        # 간단한 키워드 기반 분류
-        if any(keyword in activity_lower for keyword in ['cloud', '클라우드', 'aws', 'azure', 'gcp']):
-            return "Cloud Professional 업무"
-        elif any(keyword in activity_lower for keyword in ['csp', '파트너', 'partner', '원가', '비용']):
-            return "CSP 파트너쉽"
-        elif any(keyword in activity_lower for keyword in ['마케팅', 'marketing', '홍보', '고객']):
-            return "마케팅 및 홍보"
-        elif any(keyword in activity_lower for keyword in ['글로벌', 'global', 'presales', '영업']):
-            return "글로벌 Tech-presales"
-        else:
-            return "기타 업무"
     
     def _count_related_activities(self, goal: str) -> int:
         """특정 목표와 관련된 활동 수를 계산합니다."""
@@ -935,7 +950,8 @@ JSON 형식을 정확히 준수하여 응답해주세요.
                 "database": self.mongodb_config['database'],
                 "collection": self.mongodb_config['collection'],
                 "ai_model": self.model,
-                "total_records_analyzed": len(self.evaluation_data) if self.evaluation_data is not None else 0
+                "total_records_analyzed": len(self.evaluation_data) if self.evaluation_data is not None else 0,
+                "config_source": "환경변수"
             },
             "source_data_summary": {
                 "total_activities_found": len(analysis_data.get("activities", [])),
@@ -1060,7 +1076,8 @@ JSON 형식을 정확히 준수하여 응답해주세요.
                     "start_time": datetime.now().isoformat(),
                     "target_user_ids": target_user_ids,
                     "total_users": len(target_user_ids),
-                    "data_source": f"MongoDB: {self.mongodb_config['database']}.{self.mongodb_config['collection']}"
+                    "data_source": f"MongoDB: {self.mongodb_config['database']}.{self.mongodb_config['collection']}",
+                    "config_source": "환경변수"
                 },
                 "individual_results": {},
                 "batch_summary": {
@@ -1149,32 +1166,20 @@ JSON 형식을 정확히 준수하여 응답해주세요.
         }
         
         return stats
-    
-    def close_connection(self):
-        """MongoDB 연결을 종료합니다."""
-        if self.mongo_client:
-            self.mongo_client.close()
-            logger.info("MongoDB 연결 종료")
 
 
 def main():
     """메인 실행 함수"""
     
     print("🎯 === MongoDB 기반 주간 보고서 평가 시스템 ===")
-    print("📊 MongoDB 전용 AI 평가 시스템")
-    
-    # API 키 설정
-    openai_key = "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"
+    print("📊 MongoDB 전용 AI 평가 시스템 (환경변수 버전)")
     
     try:
-        print(f"\n🤖 시스템 초기화 중... (모델: gpt-4-turbo)")
+        print(f"\n🤖 시스템 초기화 중...")
+        print("📋 환경변수 검증 중...")
         
-        # 에이전트 초기화
-        agent = MongoDBWeeklyReportAgent(
-            openai_api_key=openai_key,
-            model="gpt-4-turbo",
-            output_path="./output"
-        )
+        # 에이전트 초기화 (환경변수 자동 로드)
+        agent = MongoDBWeeklyReportAgent()
         
         print("✅ 시스템 초기화 완료!")
         
@@ -1199,122 +1204,7 @@ def main():
                     # 컬렉션 정보 출력
                     doc_count = agent.collection.count_documents({})
                     print(f"📊 총 문서 수: {doc_count}개")
-                    
-                    # 샘플 문서 구조 확인
-                    sample_doc = agent.collection.find_one()
-                    if sample_doc:
-                        print(f"📋 문서 구조 (샘플):")
-                        for key in list(sample_doc.keys())[:10]:  # 상위 10개 필드만 표시
-                            print(f"   - {key}: {type(sample_doc[key]).__name__}")
-                    
                 except Exception as e:
                     print(f"❌ MongoDB 연결 실패: {e}")
-            
-            elif choice == "2":
-                print("\n📋 모든 사용자 목록 조회 중...")
-                try:
-                    available_users = agent.get_available_user_ids()
-                    print(f"\n📊 총 {len(available_users)}명의 사용자:")
-                    for i, user_id in enumerate(available_users, 1):
-                        print(f"  {i:2d}. User {user_id}")
-                except Exception as e:
-                    print(f"❌ 사용자 목록 조회 실패: {e}")
-            
-            elif choice == "3":
-                try:
-                    available_users = agent.get_available_user_ids()
-                    if not available_users:
-                        print("❌ 사용 가능한 사용자가 없습니다.")
-                        continue
-                    
-                    print(f"\n사용 가능한 사용자: {available_users}")
-                    user_id = input("평가할 사용자 ID를 입력하세요: ").strip()
-                    
-                    if user_id not in available_users:
-                        print(f"❌ 사용자 ID '{user_id}'는 존재하지 않습니다.")
-                        continue
-                    
-                    print(f"\n🚀 사용자 {user_id} 평가 시작...")
-                    result = agent.execute_complete_evaluation(user_id)
-                    
-                    # 결과 요약 출력
-                    if result.get("success", False):
-                        eval_result = result.get("evaluation_result", {})
-                        
-                        print(f"\n🎉 === 평가 완료 ===")
-                        print(f"📊 총 활동: {eval_result.get('overall_assessment', {}).get('total_activities', 0)}건")
-                        print(f"📅 평가 기간: {eval_result.get('overall_assessment', {}).get('evaluation_period', 'N/A')}")
-                        print(f"⭐ 연간 평가: {eval_result.get('overall_assessment', {}).get('annual_rating', 'N/A')}")
-                        print(f"📁 결과 파일: {result.get('output_file', '')}")
-                        
-                        # 주요 성과 출력
-                        achievements = eval_result.get('keyAchievements', [])
-                        if achievements:
-                            print(f"\n🏆 주요 성과:")
-                            for achievement in achievements:
-                                print(f"   - {achievement}")
-                    else:
-                        print(f"\n❌ 평가 실패: {result.get('error', '알 수 없는 오류')}")
-                        
-                except Exception as e:
-                    print(f"❌ 평가 실행 중 오류: {e}")
-            
-            elif choice == "4":
-                try:
-                    available_users = agent.get_available_user_ids()
-                    if not available_users:
-                        print("❌ 사용 가능한 사용자가 없습니다.")
-                        continue
-                    
-                    print(f"\n📊 총 {len(available_users)}명의 사용자 배치 평가를 시작합니다.")
-                    confirm = input("계속하시겠습니까? (y/N): ").strip().lower()
-                    
-                    if confirm not in ['y', 'yes']:
-                        print("❌ 배치 평가를 취소합니다.")
-                        continue
-                    
-                    print(f"\n🚀 배치 평가 시작...")
-                    batch_result = agent.execute_batch_evaluation()
-                    
-                    # 배치 결과 요약
-                    print(f"\n🎉 === 배치 평가 결과 ===")
-                    print(f"📊 총 대상: {batch_result['batch_metadata'].get('total_users', 0)}명")
-                    print(f"✅ 성공: {batch_result['batch_summary']['successful_evaluations']}건")
-                    print(f"❌ 실패: {batch_result['batch_summary']['failed_evaluations']}건")
-                    
-                    total_users = batch_result['batch_metadata'].get('total_users', 0)
-                    if total_users > 0:
-                        success_rate = (batch_result['batch_summary']['successful_evaluations'] / total_users) * 100
-                        print(f"📈 성공률: {success_rate:.1f}%")
-                        
-                except Exception as e:
-                    print(f"❌ 배치 평가 실행 중 오류: {e}")
-            
-            elif choice == "5":
-                stats = agent.get_evaluation_statistics()
-                print(f"\n📈 === 평가 통계 ===")
-                print(f"총 평가 수행: {stats['total_evaluations']}건")
-                print(f"성공한 평가: {stats['successful_evaluations']}건")
-                print(f"실패한 평가: {stats['failed_evaluations']}건")
-                if stats['total_evaluations'] > 0:
-                    success_rate = (stats['successful_evaluations'] / stats['total_evaluations']) * 100
-                    print(f"성공률: {success_rate:.1f}%")
-                print(f"최근 평가: {stats['latest_evaluation']}")
-                print(f"평가한 사용자: {stats['evaluated_users']}")
-            
-            elif choice == "6":
-                print("👋 시스템을 종료합니다.")
-                agent.close_connection()
-                break
-            
-            else:
-                print("❌ 잘못된 선택입니다. 1-6 중에서 선택해주세요.")
-        
     except Exception as e:
-        logger.error(f"메인 실행 오류: {str(e)}")
-        print(f"❌ 시스템 오류: {e}")
-        raise
-
-
-if __name__ == "__main__":
-    main()
+        print(f"\n🤖 시스템 초기화 실패")
