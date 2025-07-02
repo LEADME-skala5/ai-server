@@ -8,14 +8,14 @@ import os
 from dotenv import load_dotenv
 
 # .env 파일 로드
-load_dotenv()
+load_dotenv(override=True)
 
 # MongoDB 추가 import
 from pymongo import MongoClient
 
 # LangChain 최신 버전 호환
 try:
-    from langchain_openai import OpenAI
+    from langchain_openai import ChatOpenAI
 except ImportError:
     from langchain_community.llms import OpenAI
 
@@ -135,11 +135,11 @@ class PeerEvaluationSystem:
             )
         
         # LLM 초기화
-        self.llm = OpenAI(
+        self.llm = ChatOpenAI(
             api_key=self.openai_api_key, 
             temperature=0.7,
             max_tokens=1500,
-            model=os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo-instruct')
+            model=os.getenv('OPENAI_MODEL')
         )
         
         print("✅ 모든 환경변수가 정상적으로 로드되었습니다.")

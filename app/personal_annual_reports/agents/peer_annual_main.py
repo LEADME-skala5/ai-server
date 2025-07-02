@@ -11,7 +11,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # .env 파일 로드
-load_dotenv()
+load_dotenv(override=True)
 
 class AnnualPeerEvaluationSystem:
     def __init__(self):
@@ -38,7 +38,7 @@ class AnnualPeerEvaluationSystem:
         self.db = self.client[mongodb_database]
         
         # 분기별 데이터가 저장된 컬렉션 사용
-        self.collection = self.db.personal_quarter_reports
+        self.collection = self.db.peer_evaluation_results
         
         # MariaDB 연결 설정 (.env에서 로드)
         db_host = os.getenv('DB_HOST')
@@ -160,49 +160,35 @@ class AnnualPeerEvaluationSystem:
         """
         try:
             doc_count = self.collection.count_documents({})
-            print(f"📊 personal_quarter_reports 컬렉션: {doc_count}개 문서")
+            print(f"📊 peer_evaluation_results 컬렉션: {doc_count}개 문서")  # 이름 수정
         except Exception as e:
             print(f"구조 분석 중 오류: {e}")
     
     def get_quarterly_data(self, user_id: int, year: int) -> List[Dict]:
         """
         특정 사용자의 연간 분기별 평가 데이터 조회
-        
-        Args:
-            user_id: 사용자 ID
-            year: 평가 연도
-            
-        Returns:
-            분기별 평가 데이터 리스트
         """
         quarterly_data = []
         
         try:
-            # 모든 분기 문서 조회 (quarter 필드가 "2024Q1" 형태)
+            # 🔧 수정: 새로운 데이터 구조에 맞게 수정
             for quarter_num in [1, 2, 3, 4]:
-                quarter_str = f"{year}Q{quarter_num}"
-                query = {"quarter": quarter_str}
+                query = {
+                    "evaluated_year": year,
+                    "evaluated_quarter": quarter_num
+                }
                 document = self.collection.find_one(query)
                 
-                if document and "peer" in document:
-                    peer_data = document["peer"]
+                if document and "users" in document:
+                    users = document["users"]
                     
-                    if "evaluations" in peer_data and isinstance(peer_data["evaluations"], list):
-                        evaluations = peer_data["evaluations"]
-                        
-                        for eval_item in evaluations:
-                            if (eval_item.get("success") and 
-                                "data" in eval_item and
-                                eval_item["data"].get("user_id") == user_id):
+                    if isinstance(users, list):
+                        for user_data in users:
+                            if (isinstance(user_data, dict) and 
+                                user_data.get("user_id") == user_id):
                                 
-                                # 분기 정보 추가
-                                eval_data = eval_item["data"].copy()
-                                if "quarter" not in eval_data:
-                                    eval_data["quarter"] = quarter_num
-                                if "year" not in eval_data:
-                                    eval_data["year"] = year
-                                    
-                                quarterly_data.append(eval_data)
+                                # 🔧 수정: peer_evaluation_score 직접 사용 가능
+                                quarterly_data.append(user_data)
                                 break
                     
         except Exception as e:
@@ -210,16 +196,10 @@ class AnnualPeerEvaluationSystem:
         
         quarterly_data.sort(key=lambda x: x.get("quarter", 0))
         return quarterly_data
-    
+        
     def find_available_users(self, year: int = None) -> List[int]:
         """
         지정된 연도에 평가 데이터가 있는 사용자 ID 목록 반환
-        
-        Args:
-            year: 조회할 연도 (None이면 환경변수에서 가져옴)
-            
-        Returns:
-            사용자 ID 리스트
         """
         if year is None:
             year = int(os.getenv('EVALUATION_YEAR', '2024'))
@@ -227,26 +207,21 @@ class AnnualPeerEvaluationSystem:
         user_ids = set()
         
         try:
-            # 해당 연도의 모든 분기 문서 조회
+            # 🔧 수정: 새로운 데이터 구조에 맞게 수정
             for quarter_num in [1, 2, 3, 4]:
-                quarter_str = f"{year}Q{quarter_num}"
-                query = {"quarter": quarter_str}
+                query = {
+                    "evaluated_year": year,
+                    "evaluated_quarter": quarter_num
+                }
                 document = self.collection.find_one(query)
                 
-                if document and "peer" in document:
-                    peer_data = document["peer"]
+                if document and "users" in document:
+                    users = document["users"]
                     
-                    if isinstance(peer_data, dict) and "evaluations" in peer_data:
-                        evaluations = peer_data["evaluations"]
-                        
-                        if isinstance(evaluations, list):
-                            for eval_item in evaluations:
-                                if (eval_item.get("success") and 
-                                    "data" in eval_item):
-                                    
-                                    user_id = eval_item["data"].get("user_id")
-                                    if user_id:
-                                        user_ids.add(user_id)
+                    if isinstance(users, list):
+                        for user_data in users:
+                            if isinstance(user_data, dict) and "user_id" in user_data:
+                                user_ids.add(user_data["user_id"])
             
             user_list = sorted(list(user_ids))
             print(f"🔍 {year}년 평가 데이터가 있는 사용자: {len(user_list)}명")

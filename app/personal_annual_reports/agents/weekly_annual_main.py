@@ -12,7 +12,7 @@ import pymysql
 from dotenv import load_dotenv
 
 # .env 파일 로드
-load_dotenv()
+load_dotenv(override=True)
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -928,10 +928,22 @@ JSON 형식을 정확히 준수하여 응답해주세요.
             return response_text.strip()
     
     def save_evaluation_results(self, 
-                               results: Dict[str, Any], 
-                               analysis_data: Dict[str, Any],
-                               filename: Optional[str] = None) -> str:
+                           results: Dict[str, Any], 
+                           analysis_data: Dict[str, Any],
+                           filename: Optional[str] = None) -> str:
         """평가 결과를 JSON 파일로 저장합니다."""
+        
+        # 🔧 수정: NumpyEncoder 클래스를 메서드 시작 부분에 정의
+        class NumpyEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                elif isinstance(obj, np.floating):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                return super(NumpyEncoder, self).default(obj)
+        
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             user_id = analysis_data.get("user_info", {}).get("user_id", "unknown")
@@ -962,8 +974,9 @@ JSON 형식을 정확히 준수하여 응답해주세요.
         
         output_file = self.output_path / filename
         
+        # 🔧 수정: NumpyEncoder를 사용하여 JSON 저장
         with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(final_results, f, ensure_ascii=False, indent=2)
+            json.dump(final_results, f, ensure_ascii=False, indent=2, cls=NumpyEncoder)
         
         logger.info(f"평가 결과 저장 완료: {output_file}")
         return str(output_file)
@@ -1204,7 +1217,121 @@ def main():
                     # 컬렉션 정보 출력
                     doc_count = agent.collection.count_documents({})
                     print(f"📊 총 문서 수: {doc_count}개")
+                    
+                    # 샘플 문서 구조 확인
+                    sample_doc = agent.collection.find_one()
+                    if sample_doc:
+                        print(f"📋 문서 구조 (샘플):")
+                        for key in list(sample_doc.keys())[:10]:  # 상위 10개 필드만 표시
+                            print(f"   - {key}: {type(sample_doc[key]).__name__}")
+                    
                 except Exception as e:
                     print(f"❌ MongoDB 연결 실패: {e}")
+            
+            elif choice == "2":
+                print("\n📋 모든 사용자 목록 조회 중...")
+                try:
+                    available_users = agent.get_available_user_ids()
+                    print(f"\n📊 총 {len(available_users)}명의 사용자:")
+                    for i, user_id in enumerate(available_users, 1):
+                        print(f"  {i:2d}. User {user_id}")
+                except Exception as e:
+                    print(f"❌ 사용자 목록 조회 실패: {e}")
+            
+            elif choice == "3":
+                try:
+                    available_users = agent.get_available_user_ids()
+                    if not available_users:
+                        print("❌ 사용 가능한 사용자가 없습니다.")
+                        continue
+                    
+                    print(f"\n사용 가능한 사용자: {available_users}")
+                    user_id = input("평가할 사용자 ID를 입력하세요: ").strip()
+                    
+                    if user_id not in available_users:
+                        print(f"❌ 사용자 ID '{user_id}'는 존재하지 않습니다.")
+                        continue
+                    
+                    print(f"\n🚀 사용자 {user_id} 평가 시작...")
+                    result = agent.execute_complete_evaluation(user_id)
+                    
+                    # 결과 요약 출력
+                    if result.get("success", False):
+                        eval_result = result.get("evaluation_result", {})
+                        
+                        print(f"\n🎉 === 평가 완료 ===")
+                        print(f"📊 총 활동: {eval_result.get('overall_assessment', {}).get('total_activities', 0)}건")
+                        print(f"📅 평가 기간: {eval_result.get('overall_assessment', {}).get('evaluation_period', 'N/A')}")
+                        print(f"⭐ 연간 평가: {eval_result.get('overall_assessment', {}).get('annual_rating', 'N/A')}")
+                        print(f"📁 결과 파일: {result.get('output_file', '')}")
+                        
+                        # 주요 성과 출력
+                        achievements = eval_result.get('keyAchievements', [])
+                        if achievements:
+                            print(f"\n🏆 주요 성과:")
+                            for achievement in achievements:
+                                print(f"   - {achievement}")
+                    else:
+                        print(f"\n❌ 평가 실패: {result.get('error', '알 수 없는 오류')}")
+                        
+                except Exception as e:
+                    print(f"❌ 평가 실행 중 오류: {e}")
+            
+            elif choice == "4":
+                try:
+                    available_users = agent.get_available_user_ids()
+                    if not available_users:
+                        print("❌ 사용 가능한 사용자가 없습니다.")
+                        continue
+                    
+                    print(f"\n📊 총 {len(available_users)}명의 사용자 배치 평가를 시작합니다.")
+                    confirm = input("계속하시겠습니까? (y/N): ").strip().lower()
+                    
+                    if confirm not in ['y', 'yes']:
+                        print("❌ 배치 평가를 취소합니다.")
+                        continue
+                    
+                    print(f"\n🚀 배치 평가 시작...")
+                    batch_result = agent.execute_batch_evaluation()
+                    
+                    # 배치 결과 요약
+                    print(f"\n🎉 === 배치 평가 결과 ===")
+                    print(f"📊 총 대상: {batch_result['batch_metadata'].get('total_users', 0)}명")
+                    print(f"✅ 성공: {batch_result['batch_summary']['successful_evaluations']}건")
+                    print(f"❌ 실패: {batch_result['batch_summary']['failed_evaluations']}건")
+                    
+                    total_users = batch_result['batch_metadata'].get('total_users', 0)
+                    if total_users > 0:
+                        success_rate = (batch_result['batch_summary']['successful_evaluations'] / total_users) * 100
+                        print(f"📈 성공률: {success_rate:.1f}%")
+                        
+                except Exception as e:
+                    print(f"❌ 배치 평가 실행 중 오류: {e}")
+            
+            elif choice == "5":
+                stats = agent.get_evaluation_statistics()
+                print(f"\n📈 === 평가 통계 ===")
+                print(f"총 평가 수행: {stats['total_evaluations']}건")
+                print(f"성공한 평가: {stats['successful_evaluations']}건")
+                print(f"실패한 평가: {stats['failed_evaluations']}건")
+                if stats['total_evaluations'] > 0:
+                    success_rate = (stats['successful_evaluations'] / stats['total_evaluations']) * 100
+                    print(f"성공률: {success_rate:.1f}%")
+                print(f"최근 평가: {stats['latest_evaluation']}")
+                print(f"평가한 사용자: {stats['evaluated_users']}")
+            
+            elif choice == "6":
+                print("👋 시스템을 종료합니다.")
+                agent.close_connection()
+                break
+            
+            else:
+                print("❌ 잘못된 선택입니다. 1-6 중에서 선택해주세요.")
+        
     except Exception as e:
-        print(f"\n🤖 시스템 초기화 실패")
+        logger.error(f"메인 실행 오류: {str(e)}")
+        print(f"❌ 시스템 오류: {e}")
+        raise
+        
+if __name__ == "__main__":
+    main()
