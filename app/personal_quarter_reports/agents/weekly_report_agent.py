@@ -1,11 +1,13 @@
 import json
 import pandas as pd
 from typing import Dict, List, Any
+
 from pathlib import Path
 from datetime import datetime
 import logging
 import openai
 import os
+
 
 # .env 파일 지원
 try:
@@ -383,7 +385,10 @@ JSON 형태로만 응답해주세요:
 
 def main():
     """메인 실행 함수"""
-    print("=== AI 기반 개인별 평가 보고서 생성 (JSON 전용) ===")
+    print("
+          
+          
+          AI 기반 개인별 평가 보고서 생성 (JSON 전용) ===")
     
     try:
         # 에이전트 초기화 (.env에서 API 키 자동 로드)
@@ -406,7 +411,6 @@ def main():
     except Exception as e:
         print(f"❌ 오류 발생: {str(e)}")
         logger.error(f"보고서 생성 오류: {str(e)}")
-
 
 if __name__ == "__main__":
     main()

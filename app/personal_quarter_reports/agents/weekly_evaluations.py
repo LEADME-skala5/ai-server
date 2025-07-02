@@ -16,6 +16,7 @@ def get_connection():
         port=int(os.getenv('DB_PORT', 3306)),
         charset='utf8mb4',
         cursorclass=pymysql.cursors.DictCursor 
+
     )
 
 # Decimal을 float로 안전하게 변환하는 헬퍼 함수
@@ -39,6 +40,7 @@ def get_average_grade(evaluatee_user_id: int, year: int, quarter: int) -> float:
 
     query = """
         SELECT AVG(grade) as avg_grade
+
         FROM weekly_evaluations
         WHERE evaluatee_user_id = %s
           AND evaluation_year = %s
