@@ -243,9 +243,8 @@ class AnnualEvaluationAgent:
         
         return score_averages
     
-    def generate_annual_comment_summary(self, quarterly_data: Dict) -> Dict:
-        
-        """각 평가 항목별 연간 코멘트 요약 생성"""
+    def generate_annual_comment_summary(self, quarterly_data: Dict, user_name: str) -> Dict:
+        """각 평가 항목별 연간 코멘트 요약 생성 (사용자 이름 포함)"""
         comment_summaries = {
             "quantitative": "",
             "qualitative": "",
@@ -256,99 +255,179 @@ class AnnualEvaluationAgent:
         if "quantitative" in quarterly_data:
             quantitative_comments = []
             for quarter, data in quarterly_data["quantitative"].items():
-                # weekly_summary_text 필드에서 코멘트 추출
                 if isinstance(data, dict) and "weekly_summary_text" in data:
                     if data["weekly_summary_text"] and data["weekly_summary_text"].strip():
                         quantitative_comments.append(data["weekly_summary_text"].strip())
             
             if quantitative_comments:
-                comment_summaries["quantitative"] = self.create_simple_summary(quantitative_comments, "정량 평가")
+                comment_summaries["quantitative"] = self.create_data_driven_summary(quantitative_comments, "quantitative", user_name)
         
         # 정성 평가 코멘트 요약
         if "qualitative" in quarterly_data:
             qualitative_comments = []
             for quarter, data in quarterly_data["qualitative"].items():
-                # evaluation_text 필드에서 코멘트 추출
                 if isinstance(data, dict) and "evaluation_text" in data:
                     if data["evaluation_text"] and data["evaluation_text"].strip():
                         qualitative_comments.append(data["evaluation_text"].strip())
             
             if qualitative_comments:
-                comment_summaries["qualitative"] = self.create_simple_summary(qualitative_comments, "정성 평가")
+                comment_summaries["qualitative"] = self.create_data_driven_summary(qualitative_comments, "qualitative", user_name)
         
         # 동료 평가 코멘트 요약
         if "peer" in quarterly_data:
             peer_comments = []
             for quarter, data in quarterly_data["peer"].items():
-                # feedback 필드에서 코멘트 추출
                 if isinstance(data, dict) and "feedback" in data:
                     if data["feedback"] and data["feedback"].strip():
                         peer_comments.append(data["feedback"].strip())
             
             if peer_comments:
-                comment_summaries["peer"] = self.create_simple_summary(peer_comments, "동료 평가")
+                comment_summaries["peer"] = self.create_data_driven_summary(peer_comments, "peer", user_name)
         
         return comment_summaries
     
-    def create_simple_summary(self, comments: List[str], evaluation_type: str) -> str:
-        """GPT-4o를 활용한 코멘트 요약 생성"""
+    def create_data_driven_summary(self, comments: List[str], evaluation_type: str, user_name: str) -> str:
+        """개선된 데이터 기반 GPT-4o 요약 생성 (사용자 이름 포함, 논리적 일관성 보장)"""
         if not comments:
-            return f"{evaluation_type}에서 특별한 피드백이 없었습니다."
+            return f"{evaluation_type} 평가에서 특별한 피드백이 없었습니다."
         
-        # 모든 코멘트 결합
+        # 보수적이고 논리적으로 일관된 프롬프트 설정
+        prompts = {
+            "quantitative": {
+                "role": "성과 데이터 분석 전문가",
+                "instruction": """위 성과 데이터를 분석하여 자연스러운 문장으로 요약해주세요.
+
+분석 원칙:
+- 실제 데이터에 언급된 성과 트렌드만 사용
+- 성과 패턴과 구체적 성과가 논리적으로 일치해야 함
+- 추측하지 말고 실제 언급된 수치나 성과만 사용
+
+성과 패턴별 구조:
+1. 변화가 있는 경우 (상승/하락/변동):
+   "{user_name}님은 이번 연도 동안 [성과 변화 패턴]을 보였습니다. [특정 분기]에는 특히 [구체적 성과]를 달성했습니다."
+
+2. 일정한 수준 유지 경우:
+   "{user_name}님은 이번 연도 동안 일정한 수준의 성과를 유지했으며, [실제 데이터에 언급된 구체적 업무/성과]에서 꾸준한 모습을 보여주었습니다."
+
+주의사항:
+- 일정한 수준 유지 시 "특히" 사용 금지
+- 성과 수준과 구체적 성과의 논리적 일치 필수
+- 실제 평가 데이터에 없는 내용 추가 금지
+
+요약:""",
+                "example": f"{user_name}님은 이번 연도 동안 점진적인 성과 향상을 보였습니다. 4분기에는 특히 API 성능 최적화를 통해 시스템 속도를 대폭 개선하는 성과를 달성했습니다."
+            },
+            
+            "qualitative": {
+                "role": "행동 분석 전문가",
+                "instruction": """위 평가 데이터에서 실제로 언급된 행동 특성만을 바탕으로 자연스러운 문장으로 요약해주세요.
+
+분석 원칙:
+- 평가 데이터에 직접 언급된 구체적 행동과 태도만 사용
+- 추측하거나 일반화하지 말고 실제 기록된 내용만 활용
+- 1~4분기에 반복적으로 나타나는 행동 패턴 위주로 서술
+- 과도한 해석이나 추론 금지
+
+문장 구조:
+"{user_name}님은 연간 업무 수행에서 [실제 언급된 행동 특성]을 보여주었으며, [구체적 행동 사례]에 [참여/노력/집중]하는 등 [실제 나타난 특성]을 나타냈습니다."
+
+주의사항:
+- 긍정적 내용과 부정적 내용을 한 문장에 섞지 마세요
+- 실제 평가 데이터에 없는 행동 특성 추가 금지
+
+요약:""",
+                "example": f"{user_name}님은 연간 업무 수행에서 체계적이고 신중한 특성을 보여주었으며, 기술 세미나 주도에 적극적으로 참여하고 동료 멘토링을 지속하는 등 자기계발과 지식 공유에 대한 강한 성장 의지를 나타냈습니다."
+            },
+            
+            "peer": {
+                "role": "동료 관계 분석 전문가",
+                "instruction": """위 동료 평가 데이터에서 실제로 언급된 내용만을 바탕으로 자연스러운 문장으로 요약해주세요.
+
+분석 원칙:
+- 동료들이 실제로 언급한 구체적 행동이나 능력만 사용
+- 1~4분기에 반복적으로 등장하는 긍정적 평가 위주로 서술
+- 추측하지 말고 평가 데이터에 나타난 사실만 기반으로 작성
+- 무리한 마무리 문장 만들지 말고 실제 평가 내용으로 자연스럽게 끝내기
+
+문장 구조:
+"동료들은 {user_name}님의 [실제 언급된 구체적 행동/능력]을 높이 평가했습니다."
+또는
+"동료들은 {user_name}님의 [실제 언급된 구체적 행동/능력]을 지속적으로 칭찬했습니다."
+
+주의사항:
+- "신뢰를 얻고 있습니다" 같은 뻔한 마무리 금지
+- "~에 기여하고 있습니다" 같은 일반적 표현 금지
+- 실제 동료 평가 데이터 내용 그대로 활용하여 자연스럽게 종료
+
+요약:""",
+                "example": f"동료들은 {user_name}님의 업무 전문성과 깊이 있는 지식 공유를 높이 평가했습니다."
+            }
+        }
+        
+        config = prompts[evaluation_type]
         combined_text = " ".join(comments)
         
-        # GPT-4o를 사용한 요약 생성
+        # GPT-4o를 사용한 보수적 요약 생성
         try:
             prompt = f"""
-다음은 {evaluation_type} 관련 1~4분기 평가 코멘트들입니다. 
-이를 종합하여 한 줄로 요약해주세요. 
+당신은 {config['role']}입니다.
 
-평가 코멘트들:
+다음은 {user_name}님의 1~4분기 {evaluation_type} 평가 데이터입니다:
 {combined_text}
 
-요구사항:
-1. 한 줄로 요약 (최대 100자)
-2. 긍정적이고 건설적인 톤 유지
-3. 핵심 성과와 개선사항 포함
-4. 직무 전문성과 협업 능력에 중점
+{config['instruction']}
 
-요약:
+참고 예시: "{config['example']}"
+
+중요: 
+1. 반드시 "{user_name}님"으로 시작하는 문장을 작성하세요.
+2. 평가 데이터에 실제로 나타난 내용만 사용하고, 추측하거나 과도하게 해석하지 마세요.
+3. 논리적 일관성을 유지하세요.
+
+자연스러운 문장으로 요약:
 """
             
             response = openai.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "당신은 인사평가 전문가입니다. 직원의 연간 성과를 객관적이고 건설적으로 요약해주세요."},
+                    {"role": "system", "content": f"당신은 {config['role']}입니다. 평가 데이터에 실제로 나타난 내용만을 기반으로 보수적이고 정확하게 요약해주세요. 추측하지 말고 데이터에 명시된 사실만 사용하며, 논리적 일관성을 유지하세요."},
                     {"role": "user", "content": prompt}
                 ],
-                max_tokens=150,
-                temperature=0.7
+                max_tokens=250,
+                temperature=0.0  # 일관된 결과를 위해 0으로 고정
             )
             
             summary = response.choices[0].message.content.strip()
-            print(f"✅ {evaluation_type} GPT 요약 생성 완료: {summary[:50]}...")
+            print(f"✅ {evaluation_type} 보수적 요약 생성 완료: {summary[:50]}...")
             return summary
             
         except Exception as e:
             print(f"❌ GPT 요약 생성 실패 ({evaluation_type}): {e}")
-            # 폴백: 간단한 키워드 기반 요약
-            return self.create_fallback_summary(combined_text, evaluation_type)
+            # 폴백: 보수적 키워드 기반 요약
+            return self.create_conservative_fallback_summary(combined_text, evaluation_type, user_name)
     
-    def create_fallback_summary(self, combined_text: str, evaluation_type: str) -> str:
-        """GPT 실패 시 폴백 요약 생성"""
+    def create_conservative_fallback_summary(self, combined_text: str, evaluation_type: str, user_name: str) -> str:
+        """GPT 실패 시 보수적 폴백 요약 생성 (사용자 이름 포함)"""
+        evaluation_names = {
+            "quantitative": "정량",
+            "qualitative": "정성", 
+            "peer": "동료"
+        }
+        
         positive_keywords = ["우수", "뛰어남", "성과", "달성", "개선", "향상", "좋음", "만족", "탁월"]
         negative_keywords = ["부족", "미흡", "개선필요", "아쉬움", "부진", "저조"]
         
         positive_count = sum(1 for keyword in positive_keywords if keyword in combined_text)
         negative_count = sum(1 for keyword in negative_keywords if keyword in combined_text)
         
+        eval_name = evaluation_names[evaluation_type]
+        
         if positive_count > negative_count:
-            return f"{evaluation_type}에서 전반적으로 우수한 성과를 보였으며, 지속적인 개선과 발전을 이뤄냈습니다."
+            return f"{user_name}님은 연간 {eval_name} 평가에서 지속적으로 우수한 성과를 보여주었으며, 업무 전문성과 개선 노력에서 뛰어난 모습을 나타냈습니다."
         elif negative_count > positive_count:
-            return f"{evaluation_type}에서 일부 개선이 필요한 영역이 있으나, 지속적인 노력을 통해 발전 가능성을 보였습니다."
+            return f"{user_name}님은 연간 {eval_name} 평가에서 일부 개선이 필요한 영역이 있었지만, 꾸준한 노력을 통해 발전 가능성을 보여주었습니다."
         else:
-            return f"{evaluation_type}에서 안정적인 성과를 유지하며, 꾸준한 업무 수행을 보여주었습니다."
+            return f"{user_name}님은 연간 {eval_name} 평가에서 안정적이고 꾸준한 성과를 유지하며, 지속적인 업무 수행 능력을 보여주었습니다."
     
     def calculate_final_annual_score(self, score_averages: Dict) -> Dict:
         """동료, 정성, 정량 평가의 평균 점수들을 다시 평균내서 최종 점수 계산"""
@@ -411,7 +490,6 @@ class AnnualEvaluationAgent:
         return final_score_info
     
     def generate_annual_evaluation_report(self, user_id: int, year: int) -> Dict:
-        print(f"🔥 TEST: 메서드 시작 - 사용자 {user_id}")
         """사용자의 연간 종합 평가 리포트 생성"""
         print(f"📊 사용자 {user_id}의 {year}년 연간 종합 평가 리포트 생성 중...")
         
@@ -424,8 +502,8 @@ class AnnualEvaluationAgent:
         # 3. 점수 평균 계산
         score_averages = self.calculate_annual_score_averages(annual_data["quarterly_data"])
         
-        # 4. 코멘트 요약 생성
-        comment_summaries = self.generate_annual_comment_summary(annual_data["quarterly_data"])
+        # 4. 코멘트 요약 생성 (사용자 이름 포함)
+        comment_summaries = self.generate_annual_comment_summary(annual_data["quarterly_data"], user_info["name"])
         
         # 5. 최종 점수 계산
         final_score_info = self.calculate_final_annual_score(score_averages)
@@ -655,7 +733,8 @@ class AnnualEvaluationAgent:
                     final_score_info = annual_report.get("final_score_info", {})
                     final_score = final_score_info.get("overall_final_score", 0.0)
                     available_cats = final_score_info.get("available_categories", [])
-                    print(f"✓ User {user_id}: 연간 평가 완료 (점수: {final_score}, 카테고리: {available_cats})")
+                    user_name = annual_report.get("user", {}).get("name", f"User {user_id}")
+                    print(f"✓ {user_name}: 연간 평가 완료 (점수: {final_score}, 카테고리: {available_cats})")
                 else:
                     results.append({
                         "success": False,
@@ -681,7 +760,7 @@ class AnnualEvaluationAgent:
             print("MongoDB 연결 종료")
 
 def main():
-    print("🎯 연말 평가 에이전트 시작")
+    print("🎯 연말 평가 에이전트 시작 (논리적 일관성 + 사용자 이름 포함)")
     print("=" * 60)
     
     # 에이전트 초기화
@@ -696,21 +775,35 @@ def main():
     # 평가 년도 설정
     evaluation_year = 2024
     
-    # 평가 대상자 조회
-    print(f"\n🔍 {evaluation_year}년 연간 평가 대상자 조회 중...")
-    user_ids = agent.get_all_user_ids()
+    # 🔥 중요 사용자 ID 직접 지정 (65, 76, 91번)
+    target_user_ids = [65, 76, 91]
     
-    if not user_ids:
-        print("❌ 사용자를 찾을 수 없습니다. 프로그램을 종료합니다.")
+    print(f"\n🎯 {evaluation_year}년 연간 평가 대상자 (중요 사용자):")
+    print(f"✅ 평가 대상자: {target_user_ids} (총 {len(target_user_ids)}명)")
+    
+    # 대상 사용자 유효성 검사
+    print(f"\n🔍 대상 사용자 유효성 검사 중...")
+    valid_user_ids = []
+    for user_id in target_user_ids:
+        user_info = agent.get_user_basic_info(user_id)
+        if user_info["name"] != f"직원 {user_id}번":  # 실제 사용자 데이터가 있는지 확인
+            valid_user_ids.append(user_id)
+            print(f"✅ User {user_id}: {user_info['name']} ({user_info['job_name']})")
+        else:
+            print(f"⚠️  User {user_id}: 사용자 정보 없음, 평가 진행")
+            valid_user_ids.append(user_id)  # 데이터가 없어도 평가 시도
+    
+    if not valid_user_ids:
+        print("❌ 유효한 사용자를 찾을 수 없습니다. 프로그램을 종료합니다.")
         agent.close()
         return
     
-    print(f"✅ 최종 평가 대상자: {len(user_ids)}명")
+    print(f"✅ 최종 평가 대상자: {valid_user_ids} (총 {len(valid_user_ids)}명)")
     
-    # 연간 평가 배치 처리
-    results = agent.process_annual_evaluations(user_ids, evaluation_year)
+    # 연간 평가 배치 처리 (중요 사용자 대상)
+    results = agent.process_annual_evaluations(valid_user_ids, evaluation_year)
     
-    # 모든 사용자 처리 완료 후 랭킹 계산
+    # 중요 사용자 처리 완료 후 랭킹 계산 (전체 사용자 대상)
     print(f"\n🏆 {evaluation_year}년 전체 랭킹 계산 시작...")
     ranking_success = agent.calculate_and_update_rankings(evaluation_year)
     
@@ -718,20 +811,47 @@ def main():
     successful_count = sum(1 for r in results if r["success"])
     failed_count = len(results) - successful_count
     
-    print(f"\n🎉 {evaluation_year}년 연간 평가 완료!")
+    print(f"\n🎉 {evaluation_year}년 중요 사용자 연간 평가 완료!")
     print("=" * 60)
+    print(f"대상 사용자: {target_user_ids}")
     print(f"성공: {successful_count}명")
     print(f"실패: {failed_count}명")
-    print(f"저장 위치: {MONGO_CONFIG['db_name']}.annual_reports")
+    print(f"저장 위치: {MONGO_CONFIG['db_name']}.final_score_results")
     print(f"저장 구조: {evaluation_year}년 연간 문서 → users.{{user_id}} 형태")
+    print(f"프롬프트 개선: 논리적 일관성 보장 + 사용자 이름 포함 (Temperature 0)")
+    
+    # 개선사항 요약
+    print(f"\n📊 최종 개선된 annual_comment_summaries:")
+    print(f"1. 정량평가: 성과 패턴과 구체적 성과의 논리적 일관성 보장")
+    print(f"2. 정성평가: 실제 언급된 행동 특성만 (추측 금지)")
+    print(f"3. 동료평가: 실제 동료 평가 내용으로 자연스럽게 종료")
+    print(f"4. 사용자 이름: 모든 문장에 정확한 사용자 이름 포함")
+    print(f"5. Temperature 0: 일관되고 안정적인 결과 생성")
+    
+    # 중요 사용자 결과 상세 출력
+    print(f"\n🎯 중요 사용자 평가 결과:")
+    for result in results:
+        user_id = result["user_id"]
+        status = "✅ 성공" if result["success"] else "❌ 실패"
+        print(f"   User {user_id}: {status} - {result['message']}")
     
     # 백업 파일 저장
-    backup_filename = f"annual_evaluation_results_{evaluation_year}_backup.json"
+    backup_filename = f"annual_evaluation_results_{evaluation_year}_final.json"
     backup_data = {
         "year": evaluation_year,
-        "total_users": len(user_ids),
+        "target_users": target_user_ids,
+        "valid_users": valid_user_ids,
+        "total_users": len(valid_user_ids),
         "successful_count": successful_count,
         "failed_count": failed_count,
+        "improvement_notes": {
+            "prompt_enhancement": "논리적 일관성 보장 + 사용자 이름 포함 (Temperature 0)",
+            "quantitative": "성과 패턴과 구체적 성과의 논리적 일관성 보장",
+            "qualitative": "실제 언급된 행동 특성만 (추측 금지)",
+            "peer": "실제 동료 평가 내용으로 자연스럽게 종료",
+            "user_name": "모든 문장에 정확한 사용자 이름 포함",
+            "temperature": "0 (일관된 결과 생성)"
+        },
         "results": results
     }
     

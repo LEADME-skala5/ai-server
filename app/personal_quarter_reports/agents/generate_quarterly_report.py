@@ -53,6 +53,28 @@ class ComprehensiveReportGenerator:
             print(f"❌ MongoDB 연결 실패: {e}")
             return False
     
+    def get_all_user_ids(self) -> List[int]:
+        """users 테이블의 모든 사용자 ID 목록 조회"""
+        try:
+            conn = pymysql.connect(**DB_CONFIG)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id FROM users 
+                    ORDER BY id
+                """)
+                results = cur.fetchall()
+                user_ids = [row['id'] for row in results]
+                print(f"✅ users 테이블에서 {len(user_ids)}명의 사용자 조회 완료")
+                if user_ids:
+                    print(f"사용자 ID 범위: {min(user_ids)} ~ {max(user_ids)}")
+                return user_ids
+        except Exception as e:
+            print(f"❌ 사용자 ID 목록 조회 실패: {e}")
+            return []
+        finally:
+            if 'conn' in locals():
+                conn.close()
+    
     def get_user_info(self, user_id: int) -> Dict:
         """MariaDB에서 사용자 기본 정보 조회"""
         try:
@@ -180,25 +202,89 @@ class ComprehensiveReportGenerator:
             print(f"❌ weekly_evaluation_results 데이터 조회 실패 (user: {user_id}, {year}Q{quarter}): {e}")
             return None
     
+    def get_weekly_combination_summary(self, user_id: int, year: int, quarter: int) -> str:
+        """weekly_combination_results에서 weekly_summary_text 조회"""
+        try:
+            if not self.client:
+                if not self.connect():
+                    return ""
+            
+            db = self.client[self.database_name]
+            collection = db["weekly_combination_results"]
+            
+            # type: "personal-quarter"로 문서 조회
+            document = collection.find_one({
+                "type": "personal-quarter",
+                "evaluated_year": year,
+                "evaluated_quarter": quarter
+            })
+            
+            if not document or "users" not in document:
+                print(f"❌ weekly_combination_results에서 {year}Q{quarter} 문서 없음")
+                return ""
+            
+            # 해당 사용자 데이터 찾기
+            for user_data in document["users"]:
+                if user_data.get("user_id") == user_id:
+                    weekly_summary = user_data.get("weekly_summary_text", "")
+                    print(f"✅ 사용자 {user_id}의 {year}Q{quarter} weekly_summary_text 조회 성공")
+                    return weekly_summary
+            
+            print(f"❌ weekly_combination_results에서 사용자 {user_id} 데이터 없음")
+            return ""
+            
+        except Exception as e:
+            print(f"❌ weekly_combination_results 조회 실패 (user: {user_id}, {year}Q{quarter}): {e}")
+            return ""
+    
+    def get_peer_feedback_summary(self, user_id: int, year: int, quarter: int) -> str:
+        """peer_evaluation_results에서 feedback 조회 (processed_at 가장 빠른 문서)"""
+        try:
+            if not self.client:
+                if not self.connect():
+                    return ""
+            
+            db = self.client[self.database_name]
+            collection = db["peer_evaluation_results"]
+            
+            # type: "personal-quarter"이고 해당 년도/분기인 문서들을 processed_at 순으로 조회
+            documents = collection.find({
+                "type": "personal-quarter",
+                "evaluated_year": year,
+                "evaluated_quarter": quarter
+            }).sort("processed_at", 1)  # 오름차순 정렬 (가장 빠른 것 먼저)
+            
+            # 첫 번째 문서에서 해당 사용자 찾기
+            for document in documents:
+                if "users" not in document:
+                    continue
+                
+                for user_data in document["users"]:
+                    if user_data.get("user_id") == user_id:
+                        feedback = user_data.get("feedback", "")
+                        print(f"✅ 사용자 {user_id}의 {year}Q{quarter} peer feedback 조회 성공")
+                        return feedback
+            
+            print(f"❌ peer_evaluation_results에서 사용자 {user_id} 데이터 없음")
+            return ""
+            
+        except Exception as e:
+            print(f"❌ peer_evaluation_results 조회 실패 (user: {user_id}, {year}Q{quarter}): {e}")
+            return ""
+    
     def calculate_percentile_text(self, rank: int, total: int) -> str:
-        """랭킹을 퍼센타일 텍스트로 변환"""
+        """랭킹을 정확한 퍼센타일 텍스트로 변환"""
         if total == 0:
             return "데이터 없음"
         
+        if rank <= 0 or rank > total:
+            return "순위 데이터 오류"
+        
+        # 상위 퍼센타일 = 순위 / 총인원 * 100
         percentile = (rank / total) * 100
         
-        if percentile <= 10:
-            return "상위 10%"
-        elif percentile <= 20:
-            return "상위 20%"
-        elif percentile <= 30:
-            return "상위 30%"
-        elif percentile <= 40:
-            return "상위 40%"
-        elif percentile <= 50:
-            return "상위 50%"
-        else:
-            return f"상위 {int(percentile)}%"
+        # 소수점 첫째자리까지 표시
+        return f"상위 {percentile:.1f}% 이내"
     
     def generate_quarter_dates(self, year: int, quarter: int) -> tuple:
         """분기별 시작일과 종료일 계산"""
@@ -282,7 +368,11 @@ class ComprehensiveReportGenerator:
         # 8. 최종 점수 조회
         final_score = self.get_final_score(user_id, year, quarter)
         
-        # 9. 퍼센타일 텍스트 계산
+        # 9. 추가 데이터 조회 (개선 사항)
+        weekly_summary_text = self.get_weekly_combination_summary(user_id, year, quarter)
+        peer_feedback_summary = self.get_peer_feedback_summary(user_id, year, quarter)
+        
+        # 10. 퍼센타일 텍스트 계산 (수정된 로직)
         compare_text = "데이터 없음"
         if ranking_data and ranking_data.get("ranking_info"):
             rank_info = ranking_data["ranking_info"]
@@ -291,7 +381,7 @@ class ComprehensiveReportGenerator:
             if same_job_rank and same_job_count:
                 compare_text = self.calculate_percentile_text(same_job_rank, same_job_count)
         
-        # 10. 동료 피드백 정리
+        # 11. 동료 피드백 정리 (개선된 구조)
         peer_feedback = []
         if peer_data and peer_data.get("keyword_summary"):
             keyword_summary = peer_data["keyword_summary"]
@@ -308,7 +398,14 @@ class ComprehensiveReportGenerator:
                     "keywords": keyword_summary["negative"]
                 })
         
-        # 11. 종합 리포트 구성
+        # summary 필드 추가
+        if peer_feedback_summary:
+            peer_feedback.append({
+                "type": "summary",
+                "text": peer_feedback_summary
+            })
+        
+        # 12. 종합 리포트 구성
         report = {
             "type": "personal-quarter",
             "evaluated_year": year,
@@ -327,9 +424,9 @@ class ComprehensiveReportGenerator:
             "rank": ranking_data.get("ranking_info", {}) if ranking_data else {},
             "teamGoals": team_goals,  # ✅ weekly 데이터에서 완전한 구조
             "keyAchievements": key_achievements,  # ✅ 통계 계산됨
-            "peerFeedback": peer_feedback,
-            "quarterlyPerformanceSummary": {
-                "summaryText": performance_data.get("performance_summary", "") if performance_data else ""
+            "peerFeedback": peer_feedback,  # ✅ summary 필드 포함
+            "quarterlyPerformance": {
+                "summaryText": weekly_summary_text  # ✅ weekly_combination_results에서 조회
             },
             "workAttitude": qualitative_data.get("work_attitude", []) if qualitative_data else [],
             "finalComment": performance_data.get("performance_summary", "") if performance_data else ""
@@ -337,8 +434,8 @@ class ComprehensiveReportGenerator:
         
         return report
     
-    def save_report_to_quarter_collection(self, report_data: Dict) -> bool:
-        """분기별 문서에 사용자 리포트 저장"""
+    def save_report_to_individual_collection(self, report_data: Dict) -> bool:
+        """사용자별 개별 문서로 리포트 저장 (upsert 방식으로 개선)"""
         try:
             if not self.client:
                 if not self.connect():
@@ -351,50 +448,45 @@ class ComprehensiveReportGenerator:
             quarter = report_data["evaluated_quarter"]
             user_id = report_data["user"]["userId"]
             
-            # 분기별 문서 찾기
-            quarter_document = collection.find_one({
+            # upsert 방식으로 업데이트 또는 삽입
+            # 동일한 type, evaluated_year, evaluated_quarter, user.userId 조건으로 검색
+            filter_condition = {
                 "type": "personal-quarter",
                 "evaluated_year": year,
-                "evaluated_quarter": quarter
-            })
+                "evaluated_quarter": quarter,
+                "user.userId": user_id
+            }
             
-            if quarter_document:
-                # 기존 분기 문서가 있으면 해당 사용자 데이터 업데이트
-                collection.update_one(
-                    {
-                        "type": "personal-quarter",
-                        "evaluated_year": year,
-                        "evaluated_quarter": quarter
-                    },
-                    {
-                        "$set": {
-                            f"users.{user_id}": report_data,
-                            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        }
-                    }
-                )
-                print(f"✅ {year}Q{quarter} 문서에 사용자 {user_id} 데이터 업데이트 완료")
-            else:
-                # 새 분기 문서 생성
-                quarter_document = {
-                    "type": "personal-quarter",
-                    "evaluated_year": year,
-                    "evaluated_quarter": quarter,
-                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "title": f"{year} {quarter}분기 성과 리포트 모음",
-                    "users": {
-                        str(user_id): report_data
-                    }
+            # report_data에서 created_at 제거 (충돌 방지)
+            clean_report_data = {k: v for k, v in report_data.items() if k != "created_at"}
+            
+            # 업데이트할 데이터 준비
+            update_data = {
+                "$set": {
+                    **clean_report_data,
+                    "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                },
+                "$setOnInsert": {
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
-                
-                result = collection.insert_one(quarter_document)
-                print(f"✅ {year}Q{quarter} 새 문서 생성 및 사용자 {user_id} 데이터 저장 완료 - Document ID: {result.inserted_id}")
+            }
+            
+            # upsert=True로 설정하여 문서가 없으면 생성, 있으면 업데이트
+            result = collection.update_one(
+                filter_condition,
+                update_data,
+                upsert=True
+            )
+            
+            if result.upserted_id:
+                print(f"✅ 사용자 {user_id} {year}Q{quarter} 새 문서 생성 완료 - Document ID: {result.upserted_id}")
+            else:
+                print(f"✅ 사용자 {user_id} {year}Q{quarter} 기존 문서 업데이트 완료")
             
             return True
             
         except Exception as e:
-            print(f"❌ 분기별 리포트 저장 실패: {e}")
+            print(f"❌ 개별 리포트 저장 실패: {e}")
             return False
     
     def process_batch_reports(self, user_ids: List[int], year: int, quarter: int) -> List[Dict]:
@@ -410,8 +502,8 @@ class ComprehensiveReportGenerator:
                 # 리포트 생성
                 report = self.generate_comprehensive_report(user_id, year, quarter)
                 
-                # reports 컬렉션에 저장 (분기별 구조)
-                save_success = self.save_report_to_quarter_collection(report)
+                # reports 컬렉션에 저장 (upsert 방식)
+                save_success = self.save_report_to_individual_collection(report)
                 
                 if save_success:
                     results.append({
@@ -438,8 +530,8 @@ class ComprehensiveReportGenerator:
         
         return results
     
-    def get_quarter_report_summary(self, year: int, quarter: int) -> Dict:
-        """분기별 리포트 요약 정보 조회"""
+    def get_individual_report_summary(self, year: int, quarter: int, user_ids: List[int]) -> Dict:
+        """개별 문서 기반 리포트 요약 정보 조회"""
         try:
             if not self.client:
                 if not self.connect():
@@ -448,35 +540,23 @@ class ComprehensiveReportGenerator:
             db = self.client[self.database_name]
             collection = db["reports"]
             
-            # 분기별 문서 조회
-            quarter_document = collection.find_one({
+            # 해당 분기의 모든 개별 문서 수 조회
+            document_count = collection.count_documents({
                 "type": "personal-quarter",
                 "evaluated_year": year,
                 "evaluated_quarter": quarter
             })
             
-            if quarter_document and "users" in quarter_document:
-                user_count = len(quarter_document["users"])
-                return {
-                    "year": year,
-                    "quarter": quarter,
-                    "total_users": user_count,
-                    "document_id": str(quarter_document["_id"]),
-                    "created_at": quarter_document.get("created_at", ""),
-                    "updated_at": quarter_document.get("updated_at", "")
-                }
-            else:
-                return {
-                    "year": year,
-                    "quarter": quarter,
-                    "total_users": 0,
-                    "document_id": None,
-                    "created_at": "",
-                    "updated_at": ""
-                }
+            return {
+                "year": year,
+                "quarter": quarter,
+                "total_documents": document_count,
+                "expected_documents": len(user_ids),
+                "completion_rate": (document_count / len(user_ids) * 100) if user_ids else 0
+            }
                 
         except Exception as e:
-            print(f"❌ {year}Q{quarter} 리포트 요약 조회 실패: {e}")
+            print(f"❌ {year}Q{quarter} 개별 리포트 요약 조회 실패: {e}")
             return {}
     
     def close(self):
@@ -500,16 +580,15 @@ def process_single_quarter_reports(generator: ComprehensiveReportGenerator, user
     failed_count = len(results) - successful_count
     
     # 분기별 리포트 요약 조회
-    quarter_summary = generator.get_quarter_report_summary(year, quarter)
+    quarter_summary = generator.get_individual_report_summary(year, quarter, user_ids)
     
     print(f"\n=== {quarter}분기 종합 리포트 생성 완료 ===")
     print(f"성공: {successful_count}명")
     print(f"실패: {failed_count}명")
-    print(f"분기 문서 정보:")
-    print(f"  - Document ID: {quarter_summary.get('document_id', 'N/A')}")
-    print(f"  - 저장된 사용자 수: {quarter_summary.get('total_users', 0)}명")
-    print(f"  - 생성일시: {quarter_summary.get('created_at', 'N/A')}")
-    print(f"  - 수정일시: {quarter_summary.get('updated_at', 'N/A')}")
+    print(f"개별 문서 정보:")
+    print(f"  - 생성된 문서 수: {quarter_summary.get('total_documents', 0)}개")
+    print(f"  - 예상 문서 수: {quarter_summary.get('expected_documents', 0)}개")
+    print(f"  - 완료율: {quarter_summary.get('completion_rate', 0):.1f}%")
     
     return {
         "quarter": quarter,
@@ -534,19 +613,29 @@ def main():
     # 평가 년도 설정
     evaluation_year = 2024
     
+    # 📊 실제 평가 대상자 조회
+    print(f"\n🔍 {evaluation_year}년 평가 대상자 조회 중...")
+    print("MariaDB users 테이블에서 모든 사용자 조회...")
+    
+    user_ids = generator.get_all_user_ids()
+    
+    if not user_ids:
+        print("❌ 사용자를 찾을 수 없습니다. 프로그램을 종료합니다.")
+        generator.close()
+        return
+    
+    
     print(f"\n=== {evaluation_year}년 전체 분기 종합 리포트 생성 시작 ===")
     print(f"데이터 소스:")
     print(f"  - weekly_evaluation_results (주간평가) ✅ 개선됨")
-    print(f"  - peer_evaluation_results (동료평가)")
+    print(f"  - weekly_combination_results (주간요약) ✅ 추가됨")
+    print(f"  - peer_evaluation_results (동료평가) ✅ summary 추가됨")
     print(f"  - qualitative_evaluation_results (정성평가)")
     print(f"  - ranking_results (랭킹)")
     print(f"  - final_performance_reviews (성과검토)")
     print(f"  - user_quarter_scores (MariaDB 최종점수)")
-    print(f"저장 위치: reports 컬렉션")
+    print(f"저장 위치: reports 컬렉션 (upsert 방식으로 중복 방지)")
     print("=" * 60)
-    
-    # 처리할 사용자 ID 리스트 (1~100)
-    user_ids = list(range(1, 101))
     
     # 전체 결과 저장용
     all_quarters_results = {}
@@ -577,35 +666,39 @@ def main():
             total_processed += successful
             
             document_summary = quarter_data.get("document_summary", {})
-            if document_summary.get("document_id"):
-                total_documents += 1
-                print(f"Q{quarter}: {successful}명 성공 → 분기별 문서 1개에 저장 완료")
-                print(f"       Document ID: {document_summary['document_id']}")
-            else:
-                print(f"Q{quarter}: 데이터 없음")
+            document_count = document_summary.get("total_documents", 0)
+            total_documents += document_count
+            
+            print(f"Q{quarter}: {successful}명 성공 → {document_count}개 개별 문서 생성")
         else:
             print(f"Q{quarter}: 데이터 없음")
     
     print(f"\n🎉 처리 완료 요약:")
     print(f"  - 총 생성된 리포트: {total_processed}개")
-    print(f"  - 생성된 분기 문서: {total_documents}개")
+    print(f"  - 생성된 개별 문서: {total_documents}개")
     print(f"  - 저장 위치: {MONGO_CONFIG['db_name']}.reports")
-    print(f"  - 저장 구조: 분기별 문서 → users.{{user_id}} 형태")
+    print(f"  - 저장 구조: 사용자별 + 분기별 개별 문서 (upsert 방식)")
     print(f"  - 리포트 형식: JSON 구조화된 종합 성과 리포트")
     print(f"  - 문서 구조:")
-    print(f"    └─ 2024Q1 문서")
-    print(f"       ├─ users.1 (사용자 1 리포트)")
-    print(f"       ├─ users.2 (사용자 2 리포트)")
-    print(f"       └─ users.N (사용자 N 리포트)")
+    print(f"    ├─ User1_2024Q1 문서 (사용자 1의 1분기 리포트)")
+    print(f"    ├─ User1_2024Q2 문서 (사용자 1의 2분기 리포트)")
+    print(f"    ├─ User1_2024Q3 문서 (사용자 1의 3분기 리포트)")
+    print(f"    ├─ User1_2024Q4 문서 (사용자 1의 4분기 리포트)")
+    print(f"    ├─ User2_2024Q1 문서 (사용자 2의 1분기 리포트)")
+    print(f"    └─ ... (총 {len(user_ids)} × 4 = {len(user_ids) * 4}개 문서)")
+    print(f"  - 개선 사항:")
+    print(f"    • upsert 방식으로 중복 문서 방지 (type, evaluated_year, evaluated_quarter, user.userId 기준)")
+    print(f"    • quarterlyPerformance.summaryText = weekly_combination_results.weekly_summary_text")
+    print(f"    • peerFeedback.summary = peer_evaluation_results.feedback (processed_at 가장 빠른 문서)")
     print(f"  - 포함 데이터:")
     print(f"    • 사용자 기본 정보 (이름, 직무, 부서)")
     print(f"    • 최종 점수 및 상대적 위치")
     print(f"    • 랭킹 정보 (직무별, 팀별)")
     print(f"    • 팀 목표 및 기여도 (상세 내용 포함)")
     print(f"    • 주요 성과 통계 (활동 건수, 참여율)")
-    print(f"    • 동료 피드백 (긍정/부정 키워드)")
+    print(f"    • 동료 피드백 (긍정/부정 키워드 + AI 요약)")
     print(f"    • 업무 태도 평가")
-    print(f"    • AI 생성 성과 요약")
+    print(f"    • AI 생성 성과 요약 (주간 활동 기반)")
     
     # MongoDB 연결 종료
     generator.close()

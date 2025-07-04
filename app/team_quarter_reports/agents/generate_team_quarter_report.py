@@ -9,7 +9,7 @@ import json
 # 환경 변수 로드
 load_dotenv()
 
-class TeamQuarterReportGenerator:
+class TeamGoalsUpdater:
     def __init__(self):
         self.maria_connection = None
         self.mongo_client = None
@@ -53,501 +53,220 @@ class TeamQuarterReportGenerator:
         except Exception as e:
             print(f'❌ 데이터베이스 연결 해제 오류: {e}')
     
-    def get_organization_info(self, org_id: int) -> Dict:
-        """조직 정보 조회"""
-        try:
-            with self.maria_connection.cursor(pymysql.cursors.DictCursor) as cursor:
-                # 조직명 조회
-                cursor.execute("""
-                    SELECT name as department
-                    FROM organizations 
-                    WHERE division_id = %s
-                """, (org_id,))
-                org_info = cursor.fetchone()
-                
-                if not org_info:
-                    return {'department': f'조직{org_id}'}
-                
-                return org_info
-                
-        except Exception as e:
-            print(f'❌ 조직 정보 조회 오류: {e}')
-            return {'department': f'조직{org_id}'}
-    
-    def get_team_leader_info(self, org_id: int) -> Dict:
-        """팀장 정보 조회 (해당 팀의 첫 번째 사용자)"""
-        try:
-            with self.maria_connection.cursor(pymysql.cursors.DictCursor) as cursor:
-                cursor.execute("""
-                    SELECT id as userId, name
-                    FROM users 
-                    WHERE organization_id = %s
-                    ORDER BY id ASC
-                    LIMIT 1
-                """, (org_id,))
-                
-                leader = cursor.fetchone()
-                
-                if not leader:
-                    return {'userId': 0, 'name': '팀장 미지정'}
-                
-                return leader
-                
-        except Exception as e:
-            print(f'❌ 팀장 정보 조회 오류: {e}')
-            return {'userId': 0, 'name': '팀장 미지정'}
-    
-    def get_member_analysis(self, org_id: int, year: int, quarter: int) -> List[Dict]:
-        """팀 멤버 분석 데이터 조회 (team_ranking_info.py 결과)"""
-        try:
-            collection = self.mongo_db['ranking_results']
-            
-            document = collection.find_one({
-                'type': 'team-quarter',
-                'organization_id': org_id,
-                'evaluated_year': year,
-                'evaluated_quarter': quarter
-            })
-            
-            if not document or 'memberAnalysis' not in document:
-                print(f'⚠️ 조직 {org_id}의 {year}년 {quarter}분기 멤버 분석 데이터가 없습니다.')
-                return []
-            
-            return document['memberAnalysis']
-            
-        except Exception as e:
-            print(f'❌ 멤버 분석 데이터 조회 오류: {e}')
-            return []
-    
-    def get_hr_suggestions(self, department: str, year: int, quarter: int) -> List[Dict]:
-        """HR 제안사항 생성 (team_strategic_observations 결과 활용)"""
-        try:
-            collection = self.mongo_db['team_strategic_observations']
-            
-            # 먼저 해당 분기 데이터 조회
-            document = collection.find_one({
-                'division_name': department,
-                'evaluated_year': year,
-                'evaluated_quarter': quarter
-            })
-            
-            # 해당 분기 데이터가 없으면 4분기 데이터로 fallback
-            if not document and quarter != 4:
-                print(f'⚠️ {department}의 {year}년 {quarter}분기 데이터가 없어 4분기 데이터를 사용합니다.')
-                document = collection.find_one({
-                    'division_name': department,
-                    'evaluated_year': year,
-                    'evaluated_quarter': 4
-                })
-            
-            if not document:
-                print(f'⚠️ {department}의 {year}년 전략적 관찰 데이터가 없습니다.')
-                return []
-            
-            suggestions = []
-            
-            # 상위 성과자 제안 (finalComment 활용)
-            top_performers = document.get('top_performers', [])
-            if top_performers and len(top_performers) > 0:
-                # 상위 성과자 중 1-2명 선별하여 제안
-                selected_top = top_performers[:min(2, len(top_performers))]
-                for performer in selected_top:
-                    user_name = performer.get('user_name', '')
-                    final_comment = performer.get('finalComment', '')
-                    if user_name and final_comment:
-                        # finalComment에서 첫 번째 문장이나 적절한 길이로 추출
-                        sentences = final_comment.split('.')
-                        recommendation = sentences[0] + '.' if sentences else final_comment
-                        if len(recommendation) > 150:
-                            recommendation = recommendation[:147] + "..."
-                        
-                        suggestions.append({
-                            'target': user_name,
-                            'recommendation': recommendation
-                        })
-            
-            # 하위 성과자 제안 (finalComment 활용)
-            bottom_performers = document.get('bottom_performers', [])
-            if bottom_performers and len(bottom_performers) > 0:
-                # 하위 성과자들을 개별적으로 처리
-                selected_bottom = bottom_performers[-min(2, len(bottom_performers)):]  # 하위 1-2명
-                for performer in selected_bottom:
-                    user_name = performer.get('user_name', '')
-                    final_comment = performer.get('finalComment', '')
-                    if user_name and final_comment:
-                        # finalComment에서 개선 필요 부분 추출
-                        sentences = final_comment.split('.')
-                        # "개선이 필요한" 또는 "보완"이 포함된 문장 찾기
-                        improvement_sentence = None
-                        for sentence in sentences:
-                            if '개선' in sentence or '보완' in sentence or '향상' in sentence:
-                                improvement_sentence = sentence.strip() + '.'
-                                break
-                        
-                        if not improvement_sentence and sentences:
-                            improvement_sentence = sentences[-1].strip() + '.'  # 마지막 문장 사용
-                        
-                        recommendation = improvement_sentence if improvement_sentence else "개별 역량 강화 프로그램 참여를 권장합니다."
-                        
-                        if len(recommendation) > 150:
-                            recommendation = recommendation[:147] + "..."
-                        
-                        suggestions.append({
-                            'target': user_name,
-                            'recommendation': recommendation
-                        })
-            
-            print(f'✅ {department} HR 제안사항 {len(suggestions)}개 생성 완료')
-            return suggestions
-            
-        except Exception as e:
-            print(f'❌ HR 제안사항 조회 오류: {e}')
-            return []
-    
-    def get_org_suggestions(self, org_id: int, year: int, quarter: int) -> Dict:
-        """조직 제안사항 조회 (team_negative_peer_solution.py 결과 활용)"""
-        try:
-            collection = self.mongo_db['peer_evaluation_results']
-            
-            document = collection.find_one({
-                'type': 'team_quarter',
-                'organization': org_id,
-                'evaluated_year': year,
-                'evaluated_quarter': quarter
-            })
-            
-            if not document:
-                print(f'⚠️ 조직 {org_id}의 {year}년 {quarter}분기 부정적 키워드 분석 데이터가 없습니다.')
-                return {
-                    'suggestion': '분석 데이터가 부족합니다.'
-                }
-            
-            # 상위 부정 키워드들 추출
-            top_keywords = document.get('top_negative_keywords', [])
-            
-            if not top_keywords:
-                return {
-                    'suggestion': '특별한 개선사항이 발견되지 않았습니다.'
-                }
-            
-            # 상위 3개 키워드로 제안 생성
-            keyword_names = [kw['keyword'] for kw in top_keywords[:3]]
-            suggestion = f"구성원 간 공통 개선 키워드: {', '.join(keyword_names)}"
-            
-            return {
-                'suggestion': suggestion
-            }
-            
-        except Exception as e:
-            print(f'❌ 조직 제안사항 조회 오류: {e}')
-            return {
-                'suggestion': '데이터 조회 중 오류가 발생했습니다.'
-            }
-    
-    def get_final_comment(self, department: str, year: int, quarter: int, org_id: int) -> str:
-        """최종 코멘트 조회 (peer_evaluation_results의 improvement_recommendations 활용)"""
-        try:
-            collection = self.mongo_db['peer_evaluation_results']
-            
-            # organization_name과 department 매칭하여 동일 부서 찾기
-            document = collection.find_one({
-                'type': 'team_quarter',
-                'organization_name': department,
-                'evaluated_year': year,
-                'evaluated_quarter': quarter
-            })
-            
-            # organization_name으로 찾지 못하면 organization ID로 시도
-            if not document:
-                document = collection.find_one({
-                    'type': 'team_quarter',
-                    'organization': org_id,
-                    'evaluated_year': year,
-                    'evaluated_quarter': quarter
-                })
-            
-            if not document:
-                print(f'⚠️ {department}의 {year}년 {quarter}분기 peer evaluation 데이터가 없습니다.')
-                return f"{department}는 {year}년 {quarter}분기에 안정적인 성과를 기록했으며, 지속적인 개선을 통해 더욱 발전할 것으로 기대됩니다."
-            
-            improvement_recommendations = document.get('improvement_recommendations', '')
-            
-            if not improvement_recommendations:
-                print(f'⚠️ {department}의 improvement_recommendations가 비어있습니다.')
-                return f"{department}는 {year}년 {quarter}분기에 전반적으로 양호한 성과를 보였습니다."
-            
-            # improvement_recommendations 내용을 최종 코멘트로 사용
-            # 너무 긴 경우 적절히 요약
-            if len(improvement_recommendations) > 400:
-                # 첫 번째 문단이나 적절한 길이로 자르기
-                lines = improvement_recommendations.split('\n')
-                first_paragraph = next((line.strip() for line in lines if line.strip() and len(line.strip()) > 50), improvement_recommendations)
-                
-                if len(first_paragraph) > 400:
-                    # 첫 번째 문장들로 자르기
-                    sentences = first_paragraph.split('.')
-                    result = ""
-                    for sentence in sentences:
-                        if len(result + sentence + '.') <= 400:
-                            result += sentence + '.'
-                        else:
-                            break
-                    
-                    if len(result) < 100:  # 너무 짧으면 원본의 400자 사용
-                        result = improvement_recommendations[:397] + "..."
-                        
-                    return result
-                else:
-                    return first_paragraph
-            else:
-                return improvement_recommendations
-            
-        except Exception as e:
-            print(f'❌ 최종 코멘트 조회 오류: {e}')
-            return f"{department}는 {year}년 {quarter}분기에 지속적인 성장을 보여주고 있습니다."
-    
-    def calculate_team_final_score(self, member_analysis: List[Dict]) -> float:
-        """팀 평균 점수 계산"""
-        if not member_analysis:
-            return 0.0
-        
-        total_score = sum(member.get('score', 0) for member in member_analysis)
-        return round(total_score / len(member_analysis), 1)
-    
-    def get_quarter_dates(self, year: int, quarter: int) -> tuple:
-        """분기별 시작/종료 날짜 계산"""
-        quarter_dates = {
-            1: (f"{year}-01-01", f"{year}-03-31"),
-            2: (f"{year}-04-01", f"{year}-06-30"),
-            3: (f"{year}-07-01", f"{year}-09-30"),
-            4: (f"{year}-10-01", f"{year}-12-31")
+    def get_organization_id_mapping(self) -> Dict[str, int]:
+        """조직명 → organization_id 매핑 생성 (확인된 매핑 사용)"""
+        # 이미 확인된 매핑 결과 사용
+        mapping = {
+            'W1팀': 1, 
+            'DT3팀': 2, 
+            'Cloud3팀': 3, 
+            'ESG팀': 4
         }
-        return quarter_dates.get(quarter, (f"{year}-01-01", f"{year}-12-31"))
+        print(f'📋 조직명 매핑: {mapping}')
+        return mapping
     
-    def generate_team_quarter_report(self, org_id: int, year: int, quarter: int) -> Dict:
-        """최종 팀 분기 리포트 생성"""
+    def get_team_goals(self, org_id: int, year: int, quarter: int) -> List[Dict]:
+        """팀 목표 데이터 조회 (team_criteria + task_results 조인, team_criteria.weight 사용)"""
         try:
-            print(f'\n🔄 조직 {org_id}의 {year}년 {quarter}분기 리포트 생성 시작')
-            
-            # 1. 기본 조직 정보 조회
-            org_info = self.get_organization_info(org_id)
-            department = org_info['department']
-            
-            # 2. 팀장 정보 조회
-            team_leader = self.get_team_leader_info(org_id)
-            team_leader['department'] = department
-            
-            # 3. 멤버 분석 데이터 조회
-            member_analysis = self.get_member_analysis(org_id, year, quarter)
-            
-            if not member_analysis:
-                print(f'❌ 조직 {org_id}의 멤버 분석 데이터가 없어 리포트 생성을 중단합니다.')
-                return None
-            
-            # 4. 팀 평균 점수 계산
-            final_score = self.calculate_team_final_score(member_analysis)
-            
-            # 5. 분기 날짜 계산
-            start_date, end_date = self.get_quarter_dates(year, quarter)
-            
-            # 6. HR 제안사항 조회
-            hr_suggestions = self.get_hr_suggestions(department, year, quarter)
-            
-            # 7. 조직 제안사항 조회
-            org_suggestions = self.get_org_suggestions(org_id, year, quarter)
-            
-            # 8. 최종 코멘트 조회 (org_id 매개변수 포함)
-            final_comment = self.get_final_comment(department, year, quarter, org_id)
-            
-            # 9. 최종 리포트 구성
-            report = {
-                'type': 'team-quarter',
-                'evaluated_year': year,
-                'evaluated_quarter': quarter,
-                'title': f'{year}년 {quarter}분기 {department} 분기 리포트',
-                'created_at': datetime.now().strftime('%Y-%m-%d'),
-                'startDate': start_date,
-                'endDate': end_date,
-                'user': team_leader,
-                'finalScore': final_score,
-                'memberAnalysis': member_analysis,
-                'hrSuggestions': hr_suggestions,
-                'orgSuggestions': org_suggestions,
-                'finalComment': final_comment
-            }
-            
-            print(f'✅ 조직 {org_id} ({department}) 리포트 생성 완료')
-            print(f'   - 팀원 수: {len(member_analysis)}명')
-            print(f'   - 팀 평균 점수: {final_score}점')
-            print(f'   - HR 제안: {len(hr_suggestions)}개')
-            
-            return report
-            
+            with self.maria_connection.cursor(pymysql.cursors.DictCursor) as cursor:
+                # 분기별 컬럼명 매핑
+                quarter_column = f'q{quarter}'
+                
+                # team_criteria + task_results JOIN하여 team_criteria.weight 사용
+                cursor.execute(f"""
+                    SELECT 
+                        tc.goal_name,
+                        tc.target,
+                        tr.{quarter_column} as grade,
+                        tc.weight
+                    FROM team_criteria tc
+                    LEFT JOIN task_results tr ON tc.id = tr.task_id
+                    WHERE tc.organization_id = %s
+                    ORDER BY tc.id
+                """, (org_id,))
+                
+                team_goals_data = cursor.fetchall()
+                
+                if not team_goals_data:
+                    print(f'⚠️ 조직 {org_id}의 팀 목표 데이터가 없습니다.')
+                    return []
+                
+                team_goals = []
+                for goal in team_goals_data:
+                    goal_name = goal['goal_name']
+                    target = goal['target']
+                    grade = goal['grade']
+                    weight = goal['weight']
+                    
+                    # None이거나 빈 값 처리
+                    if not goal_name:
+                        continue
+                        
+                    # target을 배열로 변환 (줄바꿈이나 점으로 구분)
+                    if target:
+                        # 개행문자로 분할하거나 점으로 시작하는 항목들 분할
+                        content_items = []
+                        lines = target.split('\n')
+                        for line in lines:
+                            line = line.strip()
+                            if line:
+                                # 점으로 시작하는 경우 점 제거
+                                if line.startswith('.'):
+                                    line = line[1:].strip()
+                                content_items.append(line)
+                        
+                        # 너무 긴 경우 첫 번째 항목만 사용하거나 적절히 축약
+                        if len(content_items) > 3:
+                            content_items = content_items[:3]
+                        elif not content_items:
+                            # 원본 target이 너무 길면 축약
+                            if len(target) > 100:
+                                content_items = [target[:100] + "..."]
+                            else:
+                                content_items = [target]
+                    else:
+                        content_items = ["목표 내용 없음"]
+                    
+                    # content_items의 각 항목이 너무 길면 축약
+                    processed_content = []
+                    for item in content_items:
+                        if len(item) > 80:
+                            processed_content.append(item[:77] + "...")
+                        else:
+                            processed_content.append(item)
+                    
+                    team_goal = {
+                        "goalName": goal_name,
+                        "content": processed_content,
+                        "grade": grade if grade else "미평가",
+                        "weight": weight if weight is not None else 0
+                    }
+                    
+                    team_goals.append(team_goal)
+                
+                print(f'✅ 조직 {org_id}의 팀 목표 {len(team_goals)}개 조회 완료 (team_criteria.weight 사용)')
+                return team_goals
+                
         except Exception as e:
-            print(f'❌ 조직 {org_id} 리포트 생성 오류: {e}')
+            print(f'❌ 팀 목표 조회 오류: {e}')
             import traceback
             traceback.print_exc()
-            return None
+            return []
     
-    def save_team_report_to_mongodb(self, report: Dict) -> bool:
-        """팀 리포트를 MongoDB reports 컬렉션에 저장"""
+    def get_existing_team_reports(self) -> List[Dict]:
+        """기존 팀 리포트 조회"""
         try:
-            if not report:
-                return False
-            
             collection = self.mongo_db['reports']
             
-            # 기존 데이터가 있으면 업데이트, 없으면 삽입
-            filter_query = {
-                'type': 'team-quarter',
-                'user.userId': report['user']['userId'],  # 팀장 ID 기준
-                'evaluated_year': report['evaluated_year'],
-                'evaluated_quarter': report['evaluated_quarter']
-            }
+            # team-quarter 타입 리포트 조회
+            reports = list(collection.find({'type': 'team-quarter'}))
             
-            # created_at, updated_at 추가
-            report['created_at'] = datetime.now()
-            report['updated_at'] = datetime.now()
+            print(f'📋 기존 팀 리포트 {len(reports)}개 발견')
+            return reports
             
-            result = collection.replace_one(filter_query, report, upsert=True)
-            
-            org_name = report['user']['department']
+        except Exception as e:
+            print(f'❌ 기존 리포트 조회 오류: {e}')
+            return []
+    
+    def update_report_with_team_goals(self, report: Dict, org_mapping: Dict[str, int]) -> bool:
+        """개별 리포트에 teamGoals 추가 (team_criteria.weight 사용)"""
+        try:
+            # 리포트에서 조직명과 분기 정보 추출
+            department = report['user']['department']
             year = report['evaluated_year']
             quarter = report['evaluated_quarter']
             
-            if result.upserted_id:
-                print(f'✅ {org_name} {year}년 {quarter}분기 리포트 신규 저장: {result.upserted_id}')
+            # 조직명으로 organization_id 찾기
+            org_id = org_mapping.get(department)
+            if not org_id:
+                print(f'⚠️ {department}의 organization_id를 찾을 수 없습니다.')
+                return False
+            
+            # 팀 목표 조회 (team_criteria.weight 사용)
+            team_goals = self.get_team_goals(org_id, year, quarter)
+            
+            # 리포트에 teamGoals 추가
+            report['teamGoals'] = team_goals
+            report['updated_at'] = datetime.now()
+            
+            # MongoDB 업데이트
+            collection = self.mongo_db['reports']
+            filter_query = {'_id': report['_id']}
+            
+            result = collection.replace_one(filter_query, report)
+            
+            if result.modified_count > 0:
+                print(f'✅ {department} {year}년 {quarter}분기: teamGoals {len(team_goals)}개 추가 완료 (team_criteria.weight 사용)')
+                return True
             else:
-                print(f'✅ {org_name} {year}년 {quarter}분기 리포트 업데이트 완료')
-            
-            return True
-            
+                print(f'⚠️ {department} {year}년 {quarter}분기: 업데이트되지 않음')
+                return False
+                
         except Exception as e:
-            print(f'❌ 팀 리포트 저장 오류: {e}')
+            print(f'❌ 리포트 업데이트 오류: {e}')
             return False
     
-    def get_available_quarters(self) -> List[tuple]:
-        """처리 가능한 모든 분기 조회 (team-quarter 타입만, team-annual 제외)"""
+    def update_all_reports_with_team_goals(self) -> Dict:
+        """모든 기존 리포트에 teamGoals 추가 (team_criteria.weight 사용)"""
         try:
-            collection = self.mongo_db['ranking_results']
-            pipeline = [
-                {"$match": {"type": "team-quarter"}},  # team-annual 제외
-                {"$group": {
-                    "_id": {
-                        "year": "$evaluated_year", 
-                        "quarter": "$evaluated_quarter"
-                    }
-                }},
-                {"$sort": {"_id.year": 1, "_id.quarter": 1}}
-            ]
+            print(f'\n🚀 모든 팀 리포트에 teamGoals 추가 시작 (team_criteria.weight 사용)')
             
-            quarters = list(collection.aggregate(pipeline))
-            quarter_list = [(q['_id']['year'], q['_id']['quarter']) for q in quarters]
+            # 1. 조직명 매핑 조회
+            org_mapping = self.get_organization_id_mapping()
             
-            print(f"📅 처리 가능한 분기: {quarter_list}")
-            return quarter_list
-            
-        except Exception as e:
-            print(f'❌ 분기 데이터 조회 오류: {e}')
-            return []
-    
-    def get_available_organizations(self) -> List[int]:
-        """처리 가능한 모든 조직 조회"""
-        try:
-            collection = self.mongo_db['ranking_results']
-            pipeline = [
-                {"$match": {"type": "team-quarter"}},  # team-annual 제외
-                {"$group": {"_id": "$organization_id"}},
-                {"$sort": {"_id": 1}}
-            ]
-            
-            orgs = list(collection.aggregate(pipeline))
-            org_list = [org['_id'] for org in orgs if org['_id'] is not None]
-            
-            print(f"🏢 처리 가능한 조직: {org_list}")
-            return org_list
-            
-        except Exception as e:
-            print(f'❌ 조직 데이터 조회 오류: {e}')
-            return []
-    
-    def generate_all_team_reports_all_quarters(self) -> Dict:
-        """모든 팀의 모든 분기 리포트 생성 및 저장"""
-        try:
-            print(f'\n🚀 모든 팀 모든 분기 리포트 생성 시작')
-            
-            # 1. 처리 가능한 분기 목록 조회
-            available_quarters = self.get_available_quarters()
-            
-            # 2. 처리 가능한 조직 목록 조회
-            available_orgs = self.get_available_organizations()
-            
-            if not available_quarters or not available_orgs:
-                print("❌ 처리할 데이터가 없습니다.")
+            # 2. 기존 리포트 조회
+            existing_reports = self.get_existing_team_reports()
+            if not existing_reports:
+                print("❌ 기존 리포트가 없습니다.")
                 return {'success': 0, 'failed': 0, 'total': 0}
             
-            total_tasks = len(available_quarters) * len(available_orgs)
-            print(f'📋 총 처리 대상: {len(available_orgs)}개 조직 × {len(available_quarters)}개 분기 = {total_tasks}개 작업')
-            
+            total_count = len(existing_reports)
             success_count = 0
             failed_count = 0
             
-            # 3. 분기별로 모든 조직 처리
-            for year, quarter in available_quarters:
-                print(f'\n{"="*60}')
-                print(f'📅 {year}년 {quarter}분기 처리 시작')
-                print(f'{"="*60}')
-                
-                quarter_success = 0
-                quarter_failed = 0
-                
-                for org_id in available_orgs:
-                    try:
-                        # 리포트 생성
-                        report = self.generate_team_quarter_report(org_id, year, quarter)
-                        
-                        if report:
-                            # MongoDB에 저장
-                            if self.save_team_report_to_mongodb(report):
-                                success_count += 1
-                                quarter_success += 1
-                            else:
-                                failed_count += 1
-                                quarter_failed += 1
-                        else:
-                            failed_count += 1
-                            quarter_failed += 1
-                            
-                    except Exception as e:
-                        print(f'❌ 조직 {org_id} 처리 오류: {e}')
-                        failed_count += 1
-                        quarter_failed += 1
-                
-                print(f'📊 {year}년 {quarter}분기 결과: 성공 {quarter_success}개, 실패 {quarter_failed}개')
+            print(f'📋 총 {total_count}개 리포트 업데이트 시작')
             
-            print(f'\n🎉 전체 처리 완료!')
-            print(f'✅ 총 성공: {success_count}개')
-            print(f'❌ 총 실패: {failed_count}개')
-            print(f'📈 성공률: {(success_count/total_tasks)*100:.1f}%' if total_tasks > 0 else '0%')
+            # 3. 각 리포트 업데이트
+            for i, report in enumerate(existing_reports, 1):
+                try:
+                    department = report['user']['department']
+                    year = report['evaluated_year']
+                    quarter = report['evaluated_quarter']
+                    
+                    print(f'\n[{i}/{total_count}] {department} {year}년 {quarter}분기 처리 중...')
+                    
+                    if self.update_report_with_team_goals(report, org_mapping):
+                        success_count += 1
+                    else:
+                        failed_count += 1
+                        
+                except Exception as e:
+                    print(f'❌ 리포트 {i} 처리 오류: {e}')
+                    failed_count += 1
+            
+            print(f'\n🎉 업데이트 완료!')
+            print(f'✅ 성공: {success_count}개')
+            print(f'❌ 실패: {failed_count}개')
+            print(f'📈 성공률: {(success_count/total_count)*100:.1f}%' if total_count > 0 else '0%')
             
             return {
                 'success': success_count,
-                'failed': failed_count, 
-                'total': total_tasks,
-                'success_rate': (success_count/total_tasks)*100 if total_tasks > 0 else 0
+                'failed': failed_count,
+                'total': total_count,
+                'success_rate': (success_count/total_count)*100 if total_count > 0 else 0
             }
             
         except Exception as e:
-            print(f'❌ 전체 팀 리포트 생성 오류: {e}')
+            print(f'❌ 전체 업데이트 오류: {e}')
             import traceback
             traceback.print_exc()
             return {'success': 0, 'failed': 0, 'total': 0}
     
-    def show_saved_reports_summary(self):
-        """저장된 리포트 요약 확인"""
+    def show_updated_reports_summary(self):
+        """업데이트된 리포트 요약 확인 (weight 포함)"""
         try:
-            print(f"\n📊 저장된 팀 리포트 요약")
-            print("="*60)
+            print(f"\n📊 업데이트된 팀 리포트 요약 (weight 포함)")
+            print("="*80)
             
             collection = self.mongo_db['reports']
             
@@ -555,10 +274,10 @@ class TeamQuarterReportGenerator:
             team_docs = list(collection.find({'type': 'team-quarter'}))
             
             if not team_docs:
-                print("❌ 저장된 팀 리포트가 없습니다.")
+                print("❌ 팀 리포트가 없습니다.")
                 return
             
-            print(f"📋 총 {len(team_docs)}개의 팀 리포트 저장됨")
+            print(f"📋 총 {len(team_docs)}개의 팀 리포트")
             
             # 분기별 그룹화
             by_quarter = {}
@@ -568,53 +287,175 @@ class TeamQuarterReportGenerator:
                     by_quarter[key] = []
                 by_quarter[key].append(doc)
             
+            total_goals = 0
+            total_weight = 0
             for quarter_key, docs in sorted(by_quarter.items()):
                 print(f"\n🗓️ {quarter_key}:")
+                quarter_goals = 0
+                quarter_weight = 0
                 for doc in sorted(docs, key=lambda x: x['user']['userId']):
                     team_name = doc['user']['department']
                     leader_name = doc['user']['name']
                     final_score = doc.get('finalScore', 0)
                     member_count = len(doc.get('memberAnalysis', []))
-                    print(f"   {team_name} (팀장: {leader_name}): {final_score}점, {member_count}명")
+                    team_goals = doc.get('teamGoals', [])
+                    team_goals_count = len(team_goals)
+                    
+                    # 팀의 총 가중치 계산
+                    team_weight = sum(goal.get('weight', 0) for goal in team_goals)
+                    
+                    quarter_goals += team_goals_count
+                    quarter_weight += team_weight
+                    
+                    print(f"   {team_name} (팀장: {leader_name}): {final_score}점, {member_count}명, 목표 {team_goals_count}개, 총 가중치 {team_weight}")
+                
+                print(f"   📊 {quarter_key} 총 목표: {quarter_goals}개, 총 가중치: {quarter_weight}")
+                total_goals += quarter_goals
+                total_weight += quarter_weight
+            
+            print(f"\n🎯 전체 팀 목표 총계: {total_goals}개, 전체 가중치 총계: {total_weight}")
             
         except Exception as e:
             print(f'❌ 리포트 요약 확인 오류: {e}')
+    
+    def test_single_team_goals(self, org_id: int = 1, year: int = 2024, quarter: int = 3):
+        """단일 조직 팀 목표 테스트 (team_criteria.weight 사용)"""
+        try:
+            print(f'\n🧪 단일 조직 팀 목표 테스트 (team_criteria.weight 사용): 조직 {org_id}, {year}년 {quarter}분기')
+            
+            # 팀 목표 조회 (team_criteria.weight 사용)
+            team_goals = self.get_team_goals(org_id, year, quarter)
+            
+            if team_goals:
+                print(f'\n🎯 조회된 팀 목표 {len(team_goals)}개:')
+                total_weight = 0
+                for i, goal in enumerate(team_goals, 1):
+                    weight = goal.get('weight', 0)
+                    total_weight += weight
+                    print(f'\n{i}. 목표명: {goal.get("goalName", "N/A")}')
+                    print(f'   등급: {goal.get("grade", "N/A")}')
+                    print(f'   가중치: {weight}')
+                    print(f'   내용: {goal.get("content", [])}')
+                
+                print(f'\n📊 총 가중치 합계: {total_weight}')
+                
+                # JSON 형태로 출력
+                print(f'\n📄 JSON 형태 (weight 포함):')
+                print(json.dumps(team_goals, ensure_ascii=False, indent=2))
+            else:
+                print(f'❌ 조직 {org_id}의 팀 목표를 찾을 수 없습니다.')
+                
+        except Exception as e:
+            print(f'❌ 단일 팀 목표 테스트 오류: {e}')
+            import traceback
+            traceback.print_exc()
+    
+    def show_team_goals_by_organization(self):
+        """조직별 팀 목표 상세 확인 (team_criteria.weight 사용)"""
+        try:
+            print(f'\n📋 조직별 팀 목표 상세 확인 (team_criteria.weight 사용)')
+            print("="*80)
+            
+            org_mapping = self.get_organization_id_mapping()
+            
+            for org_name, org_id in org_mapping.items():
+                print(f'\n🏢 {org_name} (ID: {org_id})')
+                print("-" * 40)
+                
+                # 각 분기별 목표 확인
+                for quarter in [1, 2, 3, 4]:
+                    team_goals = self.get_team_goals(org_id, 2024, quarter)
+                    total_weight = sum(goal.get('weight', 0) for goal in team_goals)
+                    print(f'  📅 {quarter}분기: {len(team_goals)}개 목표, 총 가중치: {total_weight}')
+                    
+                    for i, goal in enumerate(team_goals[:3], 1):  # 처음 3개만 표시
+                        goal_name = goal.get('goalName', 'N/A')
+                        grade = goal.get('grade', 'N/A')
+                        weight = goal.get('weight', 0)
+                        print(f'    {i}. {goal_name[:30]}... (등급: {grade}, 가중치: {weight})')
+                    
+                    if len(team_goals) > 3:
+                        print(f'    ... 외 {len(team_goals)-3}개 더')
+                        
+        except Exception as e:
+            print(f'❌ 조직별 목표 확인 오류: {e}')
+
+    def show_sample_report_with_team_goals(self):
+        """샘플 리포트의 teamGoals 구조 확인 (weight 포함)"""
+        try:
+            print(f'\n📄 샘플 리포트의 teamGoals 구조 확인 (weight 포함)')
+            print("="*80)
+            
+            collection = self.mongo_db['reports']
+            
+            # 첫 번째 리포트 조회
+            sample_report = collection.find_one({'type': 'team-quarter'})
+            
+            if sample_report:
+                department = sample_report['user']['department']
+                year = sample_report['evaluated_year']
+                quarter = sample_report['evaluated_quarter']
+                team_goals = sample_report.get('teamGoals', [])
+                
+                print(f'📋 샘플: {department} {year}년 {quarter}분기')
+                print(f'🎯 teamGoals 개수: {len(team_goals)}개')
+                
+                if team_goals:
+                    # 가중치 통계
+                    total_weight = sum(goal.get('weight', 0) for goal in team_goals)
+                    print(f'⚖️ 총 가중치: {total_weight}')
+                    
+                    print(f'\n📄 teamGoals JSON 구조 (weight 포함):')
+                    print(json.dumps(team_goals, ensure_ascii=False, indent=2))
+                else:
+                    print('⚠️ teamGoals가 비어있습니다.')
+            else:
+                print('❌ 샘플 리포트를 찾을 수 없습니다.')
+                
+        except Exception as e:
+            print(f'❌ 샘플 리포트 확인 오류: {e}')
 
 
 def main():
     """메인 실행 함수"""
-    generator = TeamQuarterReportGenerator()
+    updater = TeamGoalsUpdater()
     
     try:
-        generator.connect_databases()
+        updater.connect_databases()
         
-        # 모든 팀의 모든 분기 리포트 생성 및 MongoDB 저장
-        result = generator.generate_all_team_reports_all_quarters()
+        # 1. 단일 팀 목표 테스트 (team_criteria.weight 사용)
+        print("="*80)
+        print("🧪 단일 팀 목표 테스트 (team_criteria.weight 사용)")
+        print("="*80)
+        updater.test_single_team_goals(org_id=1, year=2024, quarter=3)
         
-        print(f'\n📊 최종 처리 결과:')
+        # 2. 조직별 목표 상세 확인 (team_criteria.weight 사용)
+        updater.show_team_goals_by_organization()
+        
+        # 3. 모든 리포트 업데이트 (team_criteria.weight 사용)
+        print("\n" + "="*80)
+        print("🔄 모든 리포트 teamGoals 업데이트 (team_criteria.weight 사용)")
+        print("="*80)
+        result = updater.update_all_reports_with_team_goals()
+        
+        print(f'\n📊 최종 업데이트 결과:')
         print(f'   - 성공: {result["success"]}개')
         print(f'   - 실패: {result["failed"]}개') 
         print(f'   - 전체: {result["total"]}개')
         print(f'   - 성공률: {result["success_rate"]:.1f}%')
         
-        # 저장된 리포트 요약 확인
-        generator.show_saved_reports_summary()
+        # 4. 업데이트된 리포트 요약 확인 (weight 포함)
+        updater.show_updated_reports_summary()
         
-        # 단일 테스트용 (필요시 주석 해제)
-        # org_id = 1
-        # year = 2024
-        # quarter = 3
-        # report = generator.generate_team_quarter_report(org_id, year, quarter)
-        # if report:
-        #     generator.save_team_report_to_mongodb(report)
-        #     print(f'✅ 테스트 리포트 저장 완료')
+        # 5. 샘플 리포트 구조 확인 (weight 포함)
+        updater.show_sample_report_with_team_goals()
         
     except Exception as e:
         print(f'❌ 메인 처리 오류: {e}')
         import traceback
         traceback.print_exc()
     finally:
-        generator.disconnect_databases()
+        updater.disconnect_databases()
 
 
 if __name__ == '__main__':
